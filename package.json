@@ -1,0 +1,26 @@
+{
+  "name": "vt100.js",
+  "version": "0.1.0",
+  "description": "Pure TypeScript VT100 terminal emulator. Zero dependencies, headless, fast.",
+  "keywords": ["vt100", "terminal-emulator", "ansi", "typescript", "headless", "zero-dependency", "tui"],
+  "homepage": "https://github.com/beorn/vt100",
+  "bugs": "https://github.com/beorn/vt100/issues",
+  "license": "MIT",
+  "author": "Beorn",
+  "repository": "github:beorn/vt100",
+  "type": "module",
+  "module": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src"],
+  "publishConfig": { "access": "public" },
+  "engines": { "bun": ">=1.0.0", "node": ">=18" },
+  "devDependencies": {
+    "vitest": "^4.0.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  }
+}
