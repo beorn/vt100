@@ -17,14 +17,14 @@ Pure TypeScript VT100 terminal emulator. Zero dependencies, headless, fast.
 
 ## Comparison
 
-| Package | Screen State | SGR Colors | Scrollback | Wide Chars | Zero Deps | Size |
-|---------|:---:|:---:|:---:|:---:|:---:|:---:|
-| **vt100.js** | yes | 16/256/true | yes | yes | yes | ~30KB |
-| `@xterm/headless` | yes | 16/256/true | yes | yes | no | ~500KB |
-| `node-pty` + xterm | yes | 16/256/true | yes | yes | no | native build |
-| `ansi-parser` | no | parse only | no | no | yes | ~5KB |
-| `terminal-kit` | yes | 16/256/true | no | partial | no | ~2MB |
-| `blessed` / `neo-blessed` | yes | 16/256 | no | no | no | ~1MB |
+| Package                   | Screen State | SGR Colors  | Scrollback | Wide Chars | Zero Deps |     Size     |
+| ------------------------- | :----------: | :---------: | :--------: | :--------: | :-------: | :----------: |
+| **vt100.js**              |     yes      | 16/256/true |    yes     |    yes     |    yes    |    ~30KB     |
+| `@xterm/headless`         |     yes      | 16/256/true |    yes     |    yes     |    no     |    ~500KB    |
+| `node-pty` + xterm        |     yes      | 16/256/true |    yes     |    yes     |    no     | native build |
+| `ansi-parser`             |      no      | parse only  |     no     |     no     |    yes    |     ~5KB     |
+| `terminal-kit`            |     yes      | 16/256/true |     no     |  partial   |    no     |     ~2MB     |
+| `blessed` / `neo-blessed` |     yes      |   16/256    |     no     |     no     |    no     |     ~1MB     |
 
 ## Install
 
@@ -42,14 +42,14 @@ screen.process(new TextEncoder().encode("Hello, \x1b[1mBold\x1b[0m World!"))
 
 // Read cell state
 const cell = screen.getCell(0, 0)
-console.log(cell.char)  // "H"
+console.log(cell.char) // "H"
 
 // Read text
-console.log(screen.getText())  // "Hello, Bold World!"
+console.log(screen.getText()) // "Hello, Bold World!"
 
 // Check cursor position
 const pos = screen.getCursorPosition()
-console.log(pos)  // { x: 18, y: 0 }
+console.log(pos) // { x: 18, y: 0 }
 ```
 
 ## API
@@ -60,46 +60,46 @@ Create a new screen instance.
 
 ```typescript
 const screen = createVt100Screen({
-  cols: 80,          // terminal width
-  rows: 24,          // terminal height
-  scrollbackLimit: 1000  // max scrollback lines (default: 1000)
+  cols: 80, // terminal width
+  rows: 24, // terminal height
+  scrollbackLimit: 1000, // max scrollback lines (default: 1000)
 })
 ```
 
 ### Screen methods
 
-| Method | Description |
-|--------|-------------|
-| `process(data: Uint8Array)` | Feed raw terminal data |
-| `getText()` | Get all text (scrollback + screen) |
-| `getTextRange(startRow, startCol, endRow, endCol)` | Get text in a range |
-| `getLine(row)` | Get cells for a row |
-| `getCell(row, col)` | Get a single cell (char, fg, bg, bold, etc.) |
-| `getCursorPosition()` | Get cursor `{ x, y }` |
-| `getCursorVisible()` | Check cursor visibility |
-| `getMode(mode)` | Check terminal mode (`altScreen`, `bracketedPaste`, etc.) |
-| `getTitle()` | Get window title (set via OSC 0/2) |
-| `getScrollbackLength()` | Number of scrollback lines |
-| `getViewportOffset()` | Current viewport scroll offset |
-| `scrollViewport(delta)` | Scroll viewport by delta lines |
-| `resize(cols, rows)` | Resize the terminal |
-| `reset()` | Reset to initial state |
+| Method                                             | Description                                               |
+| -------------------------------------------------- | --------------------------------------------------------- |
+| `process(data: Uint8Array)`                        | Feed raw terminal data                                    |
+| `getText()`                                        | Get all text (scrollback + screen)                        |
+| `getTextRange(startRow, startCol, endRow, endCol)` | Get text in a range                                       |
+| `getLine(row)`                                     | Get cells for a row                                       |
+| `getCell(row, col)`                                | Get a single cell (char, fg, bg, bold, etc.)              |
+| `getCursorPosition()`                              | Get cursor `{ x, y }`                                     |
+| `getCursorVisible()`                               | Check cursor visibility                                   |
+| `getMode(mode)`                                    | Check terminal mode (`altScreen`, `bracketedPaste`, etc.) |
+| `getTitle()`                                       | Get window title (set via OSC 0/2)                        |
+| `getScrollbackLength()`                            | Number of scrollback lines                                |
+| `getViewportOffset()`                              | Current viewport scroll offset                            |
+| `scrollViewport(delta)`                            | Scroll viewport by delta lines                            |
+| `resize(cols, rows)`                               | Resize the terminal                                       |
+| `reset()`                                          | Reset to initial state                                    |
 
 ### Cell properties
 
 ```typescript
 interface ScreenCell {
-  char: string           // character content
-  fg: CellColor | null   // foreground color { r, g, b }
-  bg: CellColor | null   // background color { r, g, b }
+  char: string // character content
+  fg: CellColor | null // foreground color { r, g, b }
+  bg: CellColor | null // background color { r, g, b }
   bold: boolean
   faint: boolean
   italic: boolean
-  underline: UnderlineStyle  // "none" | "single" | "double" | "curly" | "dotted" | "dashed"
+  underline: UnderlineStyle // "none" | "single" | "double" | "curly" | "dotted" | "dashed"
   strikethrough: boolean
   inverse: boolean
   hidden: boolean
-  wide: boolean          // true for CJK/emoji double-width chars
+  wide: boolean // true for CJK/emoji double-width chars
 }
 ```
 

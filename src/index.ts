@@ -5,4 +5,4 @@ export {
   type ScreenCell,
   type CellColor,
   type UnderlineStyle,
-} from "./screen.ts"
+} from "./screen.js"
