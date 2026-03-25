@@ -792,9 +792,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         break
       case "H": // CUP - Cursor Position
       case "f": // HVP - same as CUP
-        curY = (parts[0] ?? 1) - 1
-        curX = (parts[1] ?? 1) - 1
-        clampCursor()
+        if (originMode) {
+          // DECOM: positions are relative to scroll region
+          curY = scrollTop + (parts[0] ?? 1) - 1
+          curX = (parts[1] ?? 1) - 1
+          // Clamp to scroll region bounds
+          if (curY < scrollTop) curY = scrollTop
+          if (curY > scrollBottom) curY = scrollBottom
+          if (curX < 0) curX = 0
+          if (curX >= cols) curX = cols - 1
+        } else {
+          curY = (parts[0] ?? 1) - 1
+          curX = (parts[1] ?? 1) - 1
+          clampCursor()
+        }
         break
       case "J": // ED - Erase in Display
         handleEraseDisplay(parts[0] ?? 0)
@@ -1138,7 +1149,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const r = grid[row]
     if (!r) return
     for (let col = startCol; col <= endCol && col < cols; col++) {
-      r[col] = emptyCell()
+      const cell = emptyCell()
+      // Fill erased cells with the current background color
+      if (attrs.bg) {
+        cell.bg = { ...attrs.bg }
+      }
+      r[col] = cell
     }
   }
 
