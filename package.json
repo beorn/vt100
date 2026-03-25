@@ -1,29 +1,16 @@
 {
-  "name": "vt100.js",
-  "version": "0.2.0",
-  "description": "Pure TypeScript VT100 terminal emulator. Zero dependencies, headless, fast.",
-  "keywords": [
-    "ansi",
-    "headless",
-    "terminal-emulator",
-    "tui",
-    "typescript",
-    "vt100",
-    "zero-dependency"
-  ],
-  "homepage": "https://github.com/beorn/vt100",
-  "bugs": "https://github.com/beorn/vt100/issues",
+  "name": "vterm",
+  "version": "0.0.1",
+  "private": true,
+  "description": "VT terminal emulator monorepo — vt100.js (VT100-era) + vterm.js (modern, full standards coverage)",
+  "homepage": "https://github.com/beorn/vterm",
   "license": "MIT",
   "author": "Beorn",
-  "repository": "github:beorn/vt100",
+  "repository": "github:beorn/vterm",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
-  "files": ["src"],
-  "publishConfig": {
-    "access": "public"
-  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

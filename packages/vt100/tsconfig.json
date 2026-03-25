@@ -7,9 +7,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "references": [
-    { "path": "packages/vt100" },
-    { "path": "packages/vterm" }
-  ],
-  "include": []
+  "include": ["src", "tests"]
 }
