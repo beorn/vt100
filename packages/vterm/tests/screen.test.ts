@@ -1306,7 +1306,7 @@ describe("semantic prompts (OSC 133)", () => {
     screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07file1 file2\n\x1b]133;D;0\x07"))
     const zones = screen.getSemanticZones()
     expect(zones.length).toBeGreaterThan(0)
-    expect(zones[0].type).toBe("prompt")
+    expect(zones[0]!.type).toBe("prompt")
   })
 
   test("records all zone types", () => {
@@ -1314,9 +1314,9 @@ describe("semantic prompts (OSC 133)", () => {
     screen.process(enc.encode("\x1b]133;A\x07$ \x1b]133;B\x07ls\n\x1b]133;C\x07output\n\x1b]133;D;0\x07"))
     const zones = screen.getSemanticZones()
     expect(zones).toHaveLength(3) // A=prompt, B=command, C=output (D is end, not stored)
-    expect(zones[0].type).toBe("prompt")
-    expect(zones[1].type).toBe("command")
-    expect(zones[2].type).toBe("output")
+    expect(zones[0]!.type).toBe("prompt")
+    expect(zones[1]!.type).toBe("command")
+    expect(zones[2]!.type).toBe("output")
   })
 
   test("records cursor position at marker", () => {
@@ -1325,8 +1325,8 @@ describe("semantic prompts (OSC 133)", () => {
     screen.process(enc.encode("\x1b]133;A\x07"))
     const zones = screen.getSemanticZones()
     expect(zones).toHaveLength(1)
-    expect(zones[0].startRow).toBe(1)
-    expect(zones[0].startCol).toBe(0)
+    expect(zones[0]!.startRow).toBe(1)
+    expect(zones[0]!.startCol).toBe(0)
   })
 
   test("zones cleared on reset", () => {
@@ -1342,8 +1342,8 @@ describe("semantic prompts (OSC 133)", () => {
     screen.process(enc.encode("\x1b]133;A\x1b\\prompt\x1b]133;B\x1b\\"))
     const zones = screen.getSemanticZones()
     expect(zones).toHaveLength(2)
-    expect(zones[0].type).toBe("prompt")
-    expect(zones[1].type).toBe("command")
+    expect(zones[0]!.type).toBe("prompt")
+    expect(zones[1]!.type).toBe("command")
   })
 })
 
