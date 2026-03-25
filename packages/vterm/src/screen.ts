@@ -20,7 +20,7 @@
  * - Scrollback buffer with configurable limit
  * - Wide character support (CJK, emoji ZWJ, regional indicators, VS-16)
  * - OSC sequences (title, hyperlinks, clipboard, colors)
- * - DCS sequences (consumed and ignored, XTVERSION response)
+ * - DCS sequences (XTVERSION, DECRQSS, XTGETTCAP, Sixel)
  * - APC sequences (Kitty graphics protocol — parsed, query responses)
  * - DA1/DA2/DA3 device attribute responses
  * - DSR (device status report) responses
@@ -929,6 +929,18 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  function handleCSIEq(params: string, _intermediates: string, finalByte: string): void {
+    // CSI = sequences
+    if (finalByte === "c") {
+      // DA3 - Tertiary Device Attributes
+      if (onResponse) {
+        if (params === "" || params === "0") {
+          onResponse("\x1bP!|00000000\x1b\\")
+        }
+      }
+    }
+  }
+
   function handleCSIPrivate(params: string, intermediates: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
 
@@ -1538,6 +1550,35 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return
     }
 
+    // DECRQSS: DCS $ q Pt ST → response DCS Ps $ r Pt ST
+    if (data.startsWith("$q") && onResponse) {
+      const pt = data.substring(2)
+      if (pt === '"p') {
+        // DECSCL - Conformance level: VT200 mode, 8-bit controls
+        onResponse('\x1bP1$r62;1"p\x1b\\')
+      } else {
+        // Not recognized
+        onResponse("\x1bP0$r\x1b\\")
+      }
+      return
+    }
+
+    // XTGETTCAP: DCS + q hex ST → response DCS 1 + r hex = hexvalue ST
+    if (data.startsWith("+q") && onResponse) {
+      const hexName = data.substring(2)
+      if (hexName === "544e") {
+        // "TN" = terminal name → "vterm"
+        const hexValue = Array.from(new TextEncoder().encode("vterm"))
+          .map((b) => b.toString(16).padStart(2, "0"))
+          .join("")
+        onResponse(`\x1bP1+r544e=${hexValue}\x1b\\`)
+      } else {
+        // Unknown capability
+        onResponse("\x1bP0+r\x1b\\")
+      }
+      return
+    }
+
     // Other DCS sequences are consumed and ignored
   }
 
@@ -1777,6 +1818,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else if (ch === ")") {
             // Designate G1 character set (ignored, just consume next byte)
             parserState = "escape_charset"
+          } else if (ch === "=") {
+            // DECKPAM - Application Keypad Mode
+            applicationKeypad = true
+            parserState = "ground"
+          } else if (ch === ">") {
+            // DECKPNM - Normal Keypad Mode
+            applicationKeypad = false
+            parserState = "ground"
           } else if (ch === "_") {
             // APC - Application Program Command
             parserState = "apc"
@@ -1826,6 +1875,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               handleCSIGt(paramPart.substring(1), intermediatePart, ch)
             } else if (paramPart.startsWith("<")) {
               handleCSILt(paramPart.substring(1), intermediatePart, ch)
+            } else if (paramPart.startsWith("=")) {
+              handleCSIEq(paramPart.substring(1), intermediatePart, ch)
             } else {
               handleCSI(paramPart, intermediatePart, ch)
             }
