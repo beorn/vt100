@@ -1044,6 +1044,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       return
     }
 
+    // DECSED / DECSEL — selective erase (CSI ? J / CSI ? K)
+    // We treat selective erase same as normal erase (no DECSCA protection tracking)
+    if (finalByte === "J") {
+      handleEraseDisplay(parts[0] ?? 0)
+      return
+    }
+    if (finalByte === "K") {
+      handleEraseLine(parts[0] ?? 0)
+      return
+    }
+
     const set = finalByte === "h"
 
     for (const code of parts) {
@@ -1081,6 +1092,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
           break
+        case 9: // X10 mouse tracking
+          mouseTracking = set
+          mouseTrackingMode = set ? 9 : 0
+          break
         case 1000: // Mouse tracking (basic)
           mouseTracking = set
           mouseTrackingMode = set ? 1000 : 0
@@ -1092,6 +1107,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 1003: // Mouse tracking (all events)
           mouseTracking = set
           mouseTrackingMode = set ? 1003 : 0
+          break
+        case 1015: // urxvt mouse encoding
+          mouseTracking = set
+          mouseTrackingMode = set ? 1015 : 0
+          break
+        case 1016: // SGR pixel mouse
+          mouseTracking = set
+          mouseTrackingMode = set ? 1016 : 0
           break
         case 1004: // Focus tracking
           focusTracking = set
@@ -2280,6 +2303,10 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         return syncOutput
       case "sgrMouse":
         return sgrMouse
+      case "pixelMouse":
+        return mouseTrackingMode === 1016
+      case "leftRightMargin":
+        return false // Not implemented yet
       case "kittyKeyboard":
         return kittyKeyboardFlags > 0
       case "kittyGraphics":

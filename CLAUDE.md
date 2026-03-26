@@ -6,10 +6,11 @@ Pure TypeScript VT terminal emulators. Zero dependencies. Two packages at differ
 
 ### vt100.js (`packages/vt100/`)
 
-Minimal VT100/VT220/xterm emulator covering ~90% of real-world terminal usage. Default backend for [Termless](https://termless.dev) test suites.
+Realistic VT100/VT220-era emulator. Only implements features the real hardware had. Default backend for [Termless](https://termless.dev) test suites.
 
-- **Exports**: `createVt100Screen`, `Vt100Screen`, `Vt100ScreenOptions`, `ScreenCell`, `CellColor`, `UnderlineStyle`
-- **Capabilities**: SGR (16/256/truecolor), cursor movement, erase, scroll regions, alternate screen, OSC title
+- **Exports**: `createVt100Screen`, `Vt100Screen`, `Vt100ScreenOptions`, `ScreenCell`, `CellColor`
+- **Capabilities**: SGR (8 standard colors, bold, underline, blink, reverse, hidden), cursor movement, erase, scroll regions, DA1/DSR responses, DECSTR soft reset, application keypad (DECKPAM/DECKPNM), OSC title, scrollback buffer
+- **Not supported** (use vterm.js): truecolor, 256 colors, bright colors, italic, faint, strikethrough, underline styles, wide chars, alt screen, mouse tracking, bracketed paste, focus tracking, synchronized output
 - **Source**: Single file — `src/screen.ts` (the entire emulator)
 
 ### vterm.js (`packages/vterm/`)

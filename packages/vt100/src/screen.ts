@@ -1,12 +1,14 @@
 /**
- * Pure TypeScript VT100 terminal emulator.
+ * Pure TypeScript VT100/VT220 terminal emulator.
  *
  * Inspired by the Rust vt100 crate — parses a terminal byte stream and
  * maintains an in-memory screen representation with per-cell attributes,
  * cursor tracking, and mode state.
  *
- * Zero dependencies. Handles: SGR (16/256/truecolor), cursor movement,
- * erase, scroll regions, alternate screen, modes, OSC title, and more.
+ * Zero dependencies. Handles: SGR (8 standard colors, bold, underline, blink,
+ * reverse, hidden), cursor movement, erase, scroll regions, modes, OSC title,
+ * DA1/DSR responses, and more. No truecolor, no 256 colors, no wide chars —
+ * those belong in vterm.js.
  */
 
 // ═══════════════════════════════════════════════════════
@@ -19,20 +21,15 @@ export interface CellColor {
   b: number
 }
 
-export type UnderlineStyle = "none" | "single" | "double" | "curly" | "dotted" | "dashed"
-
 export interface ScreenCell {
   char: string
   fg: CellColor | null
   bg: CellColor | null
   bold: boolean
-  faint: boolean
-  italic: boolean
-  underline: UnderlineStyle
-  strikethrough: boolean
+  underline: boolean
+  blink: boolean
   inverse: boolean
   hidden: boolean
-  wide: boolean
 }
 
 /** Frozen sentinel for unwritten cells — never mutate, copy-on-write in writeChar(). */
@@ -41,13 +38,10 @@ const EMPTY_CELL: ScreenCell = Object.freeze({
   fg: null,
   bg: null,
   bold: false,
-  faint: false,
-  italic: false,
-  underline: "none" as UnderlineStyle,
-  strikethrough: false,
+  underline: false,
+  blink: false,
   inverse: false,
   hidden: false,
-  wide: false,
 })
 
 function emptyCell(): ScreenCell {
@@ -55,10 +49,10 @@ function emptyCell(): ScreenCell {
 }
 
 // ═══════════════════════════════════════════════════════
-// ANSI 256-color palette
+// ANSI 8-color palette (standard VT100/VT220 colors)
 // ═══════════════════════════════════════════════════════
 
-const ANSI_16: readonly CellColor[] = [
+const ANSI_8: readonly CellColor[] = [
   { r: 0x00, g: 0x00, b: 0x00 }, // 0  Black
   { r: 0x80, g: 0x00, b: 0x00 }, // 1  Red
   { r: 0x00, g: 0x80, b: 0x00 }, // 2  Green
@@ -67,60 +61,7 @@ const ANSI_16: readonly CellColor[] = [
   { r: 0x80, g: 0x00, b: 0x80 }, // 5  Magenta
   { r: 0x00, g: 0x80, b: 0x80 }, // 6  Cyan
   { r: 0xc0, g: 0xc0, b: 0xc0 }, // 7  White
-  { r: 0x80, g: 0x80, b: 0x80 }, // 8  Bright Black
-  { r: 0xff, g: 0x00, b: 0x00 }, // 9  Bright Red
-  { r: 0x00, g: 0xff, b: 0x00 }, // 10 Bright Green
-  { r: 0xff, g: 0xff, b: 0x00 }, // 11 Bright Yellow
-  { r: 0x00, g: 0x00, b: 0xff }, // 12 Bright Blue
-  { r: 0xff, g: 0x00, b: 0xff }, // 13 Bright Magenta
-  { r: 0x00, g: 0xff, b: 0xff }, // 14 Bright Cyan
-  { r: 0xff, g: 0xff, b: 0xff }, // 15 Bright White
 ]
-
-function buildPalette256(): CellColor[] {
-  const palette: CellColor[] = [...ANSI_16]
-  const levels = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff]
-  for (let r = 0; r < 6; r++) {
-    for (let g = 0; g < 6; g++) {
-      for (let b = 0; b < 6; b++) {
-        palette.push({ r: levels[r]!, g: levels[g]!, b: levels[b]! })
-      }
-    }
-  }
-  for (let i = 0; i < 24; i++) {
-    const v = 8 + i * 10
-    palette.push({ r: v, g: v, b: v })
-  }
-  return palette
-}
-
-const PALETTE_256 = buildPalette256()
-
-// ═══════════════════════════════════════════════════════
-// Unicode width (simplified — CJK detection)
-// ═══════════════════════════════════════════════════════
-
-function isWide(codePoint: number): boolean {
-  // CJK Unified Ideographs, CJK Compatibility Ideographs, etc.
-  return (
-    (codePoint >= 0x1100 && codePoint <= 0x115f) || // Hangul Jamo
-    (codePoint >= 0x2e80 && codePoint <= 0x303e) || // CJK Radicals
-    (codePoint >= 0x3041 && codePoint <= 0x33bf) || // Hiragana, Katakana, Bopomofo, etc.
-    (codePoint >= 0x3400 && codePoint <= 0x4dbf) || // CJK Unified Extension A
-    (codePoint >= 0x4e00 && codePoint <= 0xa4cf) || // CJK Unified Ideographs
-    (codePoint >= 0xa960 && codePoint <= 0xa97c) || // Hangul Jamo Extended-A
-    (codePoint >= 0xac00 && codePoint <= 0xd7a3) || // Hangul Syllables
-    (codePoint >= 0xf900 && codePoint <= 0xfaff) || // CJK Compatibility Ideographs
-    (codePoint >= 0xfe10 && codePoint <= 0xfe19) || // Vertical Forms
-    (codePoint >= 0xfe30 && codePoint <= 0xfe6b) || // CJK Compatibility Forms
-    (codePoint >= 0xff01 && codePoint <= 0xff60) || // Fullwidth Forms
-    (codePoint >= 0xffe0 && codePoint <= 0xffe6) || // Fullwidth Signs
-    (codePoint >= 0x1f300 && codePoint <= 0x1f9ff) || // Misc Symbols/Emoticons
-    (codePoint >= 0x1fa00 && codePoint <= 0x1faff) || // Extended Symbols & Pictographs
-    (codePoint >= 0x20000 && codePoint <= 0x2fffd) || // CJK Extension B-F
-    (codePoint >= 0x30000 && codePoint <= 0x3fffd) // CJK Extension G+
-  )
-}
 
 // ═══════════════════════════════════════════════════════
 // Screen
@@ -130,16 +71,16 @@ export interface ScreenOptions {
   cols: number
   rows: number
   scrollbackLimit?: number
+  /** Callback for DA1/DSR responses — write these back to the PTY */
+  onResponse?: (data: string) => void
 }
 
 interface Attrs {
   fg: CellColor | null
   bg: CellColor | null
   bold: boolean
-  faint: boolean
-  italic: boolean
-  underline: UnderlineStyle
-  strikethrough: boolean
+  underline: boolean
+  blink: boolean
   inverse: boolean
   hidden: boolean
 }
@@ -167,11 +108,10 @@ export function createScreen(opts: ScreenOptions): Screen {
   let cols = opts.cols
   let rows = opts.rows
   const scrollbackLimit = opts.scrollbackLimit ?? 1000
+  const onResponse = opts.onResponse
 
-  // Main and alternate screen buffers
-  let mainGrid: ScreenCell[][] = makeGrid(cols, rows)
-  let altGrid: ScreenCell[][] = makeGrid(cols, rows)
-  let grid = mainGrid
+  // Main screen buffer (no alternate screen in VT100/VT220)
+  let grid: ScreenCell[][] = makeGrid(cols, rows)
   let scrollback: ScreenCell[][] = []
 
   // Cursor
@@ -202,13 +142,9 @@ export function createScreen(opts: ScreenOptions): Screen {
 
   // Terminal state
   let title = ""
-  let useAltScreen = false
-  let bracketedPaste = false
   let applicationCursor = false
   let applicationKeypad = false
   let autoWrap = true
-  let mouseTracking = false
-  let focusTracking = false
   let originMode = false
   let insertMode = false
   let reverseVideo = false
@@ -249,10 +185,8 @@ export function createScreen(opts: ScreenOptions): Screen {
       fg: null,
       bg: null,
       bold: false,
-      faint: false,
-      italic: false,
-      underline: "none",
-      strikethrough: false,
+      underline: false,
+      blink: false,
       inverse: false,
       hidden: false,
     }
@@ -268,8 +202,8 @@ export function createScreen(opts: ScreenOptions): Screen {
   // ── Scrolling ──
 
   function scrollUp(top: number, bottom: number): void {
-    // Move top row to scrollback (only if main screen & top of screen)
-    if (grid === mainGrid && top === 0) {
+    // Move top row to scrollback (only if top of screen)
+    if (top === 0) {
       scrollback.push(grid[0]!)
       // Bulk trim when exceeding 2x limit to avoid O(n) shift() on every scroll
       if (scrollback.length > scrollbackLimit * 2) {
@@ -293,12 +227,8 @@ export function createScreen(opts: ScreenOptions): Screen {
   // ── Character writing ──
 
   function writeChar(ch: string): void {
-    const codePoint = ch.codePointAt(0) ?? 0
-    const wide = isWide(codePoint)
-    const charWidth = wide ? 2 : 1
-
     // Handle autowrap at end of line
-    if (curX + charWidth > cols) {
+    if (curX >= cols) {
       if (autoWrap) {
         curX = 0
         curY++
@@ -307,17 +237,15 @@ export function createScreen(opts: ScreenOptions): Screen {
           scrollUp(scrollTop, scrollBottom)
         }
       } else {
-        curX = cols - charWidth
+        curX = cols - 1
       }
     }
 
     // Insert mode: shift existing characters right before writing
     if (insertMode) {
       const row = grid[curY]!
-      for (let i = 0; i < charWidth; i++) {
-        row.splice(curX, 0, EMPTY_CELL)
-        row.pop()
-      }
+      row.splice(curX, 0, EMPTY_CELL)
+      row.pop()
     }
 
     // Copy-on-write: if cell is the shared EMPTY_CELL sentinel, create a fresh object
@@ -331,35 +259,12 @@ export function createScreen(opts: ScreenOptions): Screen {
     cell.fg = attrs.fg ? { ...attrs.fg } : null
     cell.bg = attrs.bg ? { ...attrs.bg } : null
     cell.bold = attrs.bold
-    cell.faint = attrs.faint
-    cell.italic = attrs.italic
     cell.underline = attrs.underline
-    cell.strikethrough = attrs.strikethrough
+    cell.blink = attrs.blink
     cell.inverse = attrs.inverse
     cell.hidden = attrs.hidden
-    cell.wide = wide
 
-    if (wide && curX + 1 < cols) {
-      // Spacer cell for wide character — always create fresh
-      let spacer = row[curX + 1]!
-      if (spacer === EMPTY_CELL) {
-        spacer = { ...EMPTY_CELL }
-        row[curX + 1] = spacer
-      }
-      spacer.char = ""
-      spacer.fg = null
-      spacer.bg = null
-      spacer.bold = false
-      spacer.faint = false
-      spacer.italic = false
-      spacer.underline = "none"
-      spacer.strikethrough = false
-      spacer.inverse = false
-      spacer.hidden = false
-      spacer.wide = false
-    }
-
-    curX += charWidth
+    curX++
   }
 
   // ── CSI handler ──
@@ -454,9 +359,24 @@ export function createScreen(opts: ScreenOptions): Screen {
         curX = 0
         curY = originMode ? scrollTop : 0
         break
-      case "n": // DSR - Device Status Report (ignore)
+      case "n": // DSR - Device Status Report
+        if (onResponse) {
+          if (parts[0] === 5) {
+            // Status report - OK
+            onResponse("\x1b[0n")
+          } else if (parts[0] === 6) {
+            // CPR - Cursor position report (1-based)
+            onResponse(`\x1b[${curY + 1};${curX + 1}R`)
+          }
+        }
         break
-      case "c": // DA - Device Attributes (ignore)
+      case "c": // DA1 - Primary Device Attributes
+        if (onResponse) {
+          if (params === "" || params === "0") {
+            // VT100 with Advanced Video Option (AVO)
+            onResponse("\x1b[?1;2c")
+          }
+        }
         break
       case "s": // SCP - Save Cursor Position
         savedCurX = curX
@@ -473,6 +393,14 @@ export function createScreen(opts: ScreenOptions): Screen {
     }
   }
 
+  function handleCSIWithIntermediate(_params: string, intermediate: string, finalByte: string): void {
+    if (intermediate === "!" && finalByte === "p") {
+      // DECSTR - Soft Terminal Reset
+      softReset()
+    }
+    // Unknown intermediate sequences — ignore
+  }
+
   function handleCSIPrivate(params: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
     const set = finalByte === "h"
@@ -481,6 +409,12 @@ export function createScreen(opts: ScreenOptions): Screen {
       switch (code) {
         case 1: // DECCKM - Application Cursor
           applicationCursor = set
+          break
+        case 4: // IRM - Insert Mode (via DEC private)
+          insertMode = set
+          break
+        case 5: // DECSCNM - Reverse Video
+          reverseVideo = set
           break
         case 6: // DECOM - Origin Mode
           originMode = set
@@ -491,51 +425,21 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 25: // DECTCEM - Cursor Visible
           curVisible = set
           break
-        case 47: // Alternate screen buffer (old)
-        case 1047: // Alternate screen buffer
-          if (set && !useAltScreen) {
-            useAltScreen = true
-            grid = altGrid
-          } else if (!set && useAltScreen) {
-            useAltScreen = false
-            grid = mainGrid
-          }
-          break
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
           break
-        case 1000: // Mouse tracking (basic)
-        case 1002: // Mouse tracking (button events)
-        case 1003: // Mouse tracking (all events)
-          mouseTracking = set
-          break
-        case 1004: // Focus tracking
-          focusTracking = set
-          break
-        case 1049: // Alternate screen buffer + save/restore cursor
-          if (set && !useAltScreen) {
-            savedCurX = curX
-            savedCurY = curY
-            useAltScreen = true
-            altGrid = makeGrid(cols, rows)
-            grid = altGrid
-            curX = 0
-            curY = 0
-          } else if (!set && useAltScreen) {
-            useAltScreen = false
-            grid = mainGrid
-            curX = savedCurX
-            curY = savedCurY
-            clampCursor()
-          }
-          break
-        case 2004: // Bracketed paste
-          bracketedPaste = set
-          break
-        case 5: // DECSCNM - Reverse Video
-          reverseVideo = set
-          break
-        case 4: // IRM - Insert Mode (via DEC private)
+      }
+    }
+  }
+
+  // Also handle standard (non-private) set/reset modes: CSI Ps h / CSI Ps l
+  function handleSetResetMode(params: string, finalByte: string): void {
+    const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+    const set = finalByte === "h"
+
+    for (const code of parts) {
+      switch (code) {
+        case 4: // IRM - Insert/Replace Mode
           insertMode = set
           break
       }
@@ -635,20 +539,7 @@ export function createScreen(opts: ScreenOptions): Screen {
   // ── SGR (Select Graphic Rendition) ──
 
   function handleSGR(rawParams: string): void {
-    // Parse SGR parameters, handling colon sub-parameters (e.g., "4:3" for curly underline)
-    const segments = rawParams.split(";")
-    const params: number[] = []
-    // Map from param index to colon sub-parameters (e.g., index of "4" -> [4, 3])
-    const subParams = new Map<number, number[]>()
-    for (const seg of segments) {
-      if (seg.includes(":")) {
-        const subs = seg.split(":").map((s) => (s === "" ? 0 : parseInt(s, 10)))
-        subParams.set(params.length, subs)
-        params.push(subs[0]!)
-      } else {
-        params.push(seg === "" ? 0 : parseInt(seg, 10))
-      }
-    }
+    const params = rawParams.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
 
     if (params.length === 0 || (params.length === 1 && params[0] === 0)) {
       attrs = resetAttrs()
@@ -665,75 +556,32 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 1:
           attrs.bold = true
           break
-        case 2:
-          attrs.faint = true
+        case 4:
+          attrs.underline = true
           break
-        case 3:
-          attrs.italic = true
+        case 5: // Blink
+          attrs.blink = true
           break
-        case 4: {
-          // SGR 4 with optional sub-parameter: 4:0=none, 4:1=single, 4:3=curly, etc.
-          const subs = subParams.get(i)
-          if (subs && subs.length > 1) {
-            const sub = subs[1]!
-            switch (sub) {
-              case 0:
-                attrs.underline = "none"
-                break
-              case 1:
-                attrs.underline = "single"
-                break
-              case 2:
-                attrs.underline = "double"
-                break
-              case 3:
-                attrs.underline = "curly"
-                break
-              case 4:
-                attrs.underline = "dotted"
-                break
-              case 5:
-                attrs.underline = "dashed"
-                break
-              default:
-                attrs.underline = "single"
-                break
-            }
-          } else {
-            attrs.underline = "single"
-          }
-          break
-        }
         case 7:
           attrs.inverse = true
           break
         case 8: // Hidden/conceal
           attrs.hidden = true
           break
-        case 9:
-          attrs.strikethrough = true
-          break
-        case 21: // Double underline
-          attrs.underline = "double"
-          break
-        case 22: // Normal intensity (neither bold nor faint)
+        case 22: // Normal intensity (turn off bold)
           attrs.bold = false
-          attrs.faint = false
-          break
-        case 23:
-          attrs.italic = false
           break
         case 24:
-          attrs.underline = "none"
+          attrs.underline = false
+          break
+        case 25: // Blink off
+          attrs.blink = false
           break
         case 27:
           attrs.inverse = false
           break
         case 28: // Reveal (turn off hidden/conceal)
           attrs.hidden = false
-          break
-        case 29:
-          attrs.strikethrough = false
           break
         // Foreground colors 30-37
         case 30:
@@ -744,17 +592,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 35:
         case 36:
         case 37:
-          attrs.fg = { ...PALETTE_256[code - 30]! }
+          attrs.fg = { ...ANSI_8[code - 30]! }
           break
-        case 38: {
-          // Extended foreground: 38;5;N (256) or 38;2;R;G;B (truecolor)
-          const result = parseExtendedColor(params, i)
-          if (result) {
-            attrs.fg = result.color
-            i = result.nextIndex - 1 // -1 because loop increments
-          }
-          break
-        }
         case 39: // Default foreground
           attrs.fg = null
           break
@@ -767,68 +606,14 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 45:
         case 46:
         case 47:
-          attrs.bg = { ...PALETTE_256[code - 40]! }
+          attrs.bg = { ...ANSI_8[code - 40]! }
           break
-        case 48: {
-          // Extended background: 48;5;N (256) or 48;2;R;G;B (truecolor)
-          const result = parseExtendedColor(params, i)
-          if (result) {
-            attrs.bg = result.color
-            i = result.nextIndex - 1
-          }
-          break
-        }
         case 49: // Default background
           attrs.bg = null
-          break
-        // Bright foreground 90-97
-        case 90:
-        case 91:
-        case 92:
-        case 93:
-        case 94:
-        case 95:
-        case 96:
-        case 97:
-          attrs.fg = { ...PALETTE_256[code - 90 + 8]! }
-          break
-        // Bright background 100-107
-        case 100:
-        case 101:
-        case 102:
-        case 103:
-        case 104:
-        case 105:
-        case 106:
-        case 107:
-          attrs.bg = { ...PALETTE_256[code - 100 + 8]! }
           break
       }
       i++
     }
-  }
-
-  function parseExtendedColor(params: number[], startIndex: number): { color: CellColor; nextIndex: number } | null {
-    if (startIndex + 1 >= params.length) return null
-
-    const type = params[startIndex + 1]
-    if (type === 5 && startIndex + 2 < params.length) {
-      // 256-color: 38;5;N
-      const idx = params[startIndex + 2]!
-      const color = PALETTE_256[idx] ?? { r: 0, g: 0, b: 0 }
-      return { color: { ...color }, nextIndex: startIndex + 3 }
-    } else if (type === 2 && startIndex + 4 < params.length) {
-      // Truecolor: 38;2;R;G;B
-      return {
-        color: {
-          r: params[startIndex + 2]!,
-          g: params[startIndex + 3]!,
-          b: params[startIndex + 4]!,
-        },
-        nextIndex: startIndex + 5,
-      }
-    }
-    return null
   }
 
   // ── OSC handler ──
@@ -883,16 +668,7 @@ export function createScreen(opts: ScreenOptions): Screen {
             // CR - Carriage Return
             curX = 0
           } else if (code >= 0x20) {
-            // Handle surrogate pairs for characters > U+FFFF
-            let char = ch
-            if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
-              const nextCode = text.charCodeAt(i + 1)
-              if (nextCode >= 0xdc00 && nextCode <= 0xdfff) {
-                char = ch + text[i + 1]!
-                i++
-              }
-            }
-            writeChar(char)
+            writeChar(ch)
           }
           break
 
@@ -957,6 +733,14 @@ export function createScreen(opts: ScreenOptions): Screen {
               scrollUp(scrollTop, scrollBottom)
             }
             parserState = "ground"
+          } else if (ch === "=") {
+            // DECKPAM - Application Keypad Mode
+            applicationKeypad = true
+            parserState = "ground"
+          } else if (ch === ">") {
+            // DECKPNM - Normal Keypad Mode
+            applicationKeypad = false
+            parserState = "ground"
           } else {
             // Unknown escape — return to ground
             parserState = "ground"
@@ -968,8 +752,27 @@ export function createScreen(opts: ScreenOptions): Screen {
             // Final byte — dispatch CSI
             if (escBuf.startsWith("?")) {
               handleCSIPrivate(escBuf.substring(1), ch)
+            } else if (ch === "h" || ch === "l") {
+              // Standard set/reset mode (non-private)
+              handleSetResetMode(escBuf, ch)
             } else {
-              handleCSI(escBuf, ch)
+              // Check for intermediate bytes (0x20-0x2F range, e.g., "!" in CSI ! p)
+              // Find first intermediate byte in escBuf
+              let intermediateIdx = -1
+              for (let j = 0; j < escBuf.length; j++) {
+                const c = escBuf.charCodeAt(j)
+                if (c >= 0x20 && c <= 0x2f) {
+                  intermediateIdx = j
+                  break
+                }
+              }
+              if (intermediateIdx >= 0) {
+                const paramPart = escBuf.substring(0, intermediateIdx)
+                const intermediatePart = escBuf.substring(intermediateIdx)
+                handleCSIWithIntermediate(paramPart, intermediatePart, ch)
+              } else {
+                handleCSI(escBuf, ch)
+              }
             }
             parserState = "ground"
           } else if (escBuf.length >= 256) {
@@ -1017,9 +820,7 @@ export function createScreen(opts: ScreenOptions): Screen {
   }
 
   function fullReset(): void {
-    mainGrid = makeGrid(cols, rows)
-    altGrid = makeGrid(cols, rows)
-    grid = mainGrid
+    grid = makeGrid(cols, rows)
     scrollback = []
     curX = 0
     curY = 0
@@ -1029,13 +830,9 @@ export function createScreen(opts: ScreenOptions): Screen {
     savedState = { curX: 0, curY: 0, attrs: resetAttrs(), originMode: false, autoWrap: true }
     attrs = resetAttrs()
     title = ""
-    useAltScreen = false
-    bracketedPaste = false
     applicationCursor = false
     applicationKeypad = false
     autoWrap = true
-    mouseTracking = false
-    focusTracking = false
     originMode = false
     insertMode = false
     reverseVideo = false
@@ -1047,17 +844,29 @@ export function createScreen(opts: ScreenOptions): Screen {
     oscBuf = ""
   }
 
+  function softReset(): void {
+    attrs = resetAttrs()
+    applicationCursor = false
+    applicationKeypad = false
+    autoWrap = true
+    originMode = false
+    insertMode = false
+    reverseVideo = false
+    curVisible = true
+    scrollTop = 0
+    scrollBottom = rows - 1
+    savedState = { curX: 0, curY: 0, attrs: resetAttrs(), originMode: false, autoWrap: true }
+    savedCurX = 0
+    savedCurY = 0
+  }
+
   function resize(newCols: number, newRows: number): void {
-    const newMain = makeGrid(newCols, newRows)
-    const newAlt = makeGrid(newCols, newRows)
+    const newGrid = makeGrid(newCols, newRows)
 
-    // Copy content from old grids
-    copyGrid(mainGrid, newMain, Math.min(cols, newCols), Math.min(rows, newRows))
-    copyGrid(altGrid, newAlt, Math.min(cols, newCols), Math.min(rows, newRows))
+    // Copy content from old grid
+    copyGrid(grid, newGrid, Math.min(cols, newCols), Math.min(rows, newRows))
 
-    mainGrid = newMain
-    altGrid = newAlt
-    grid = useAltScreen ? altGrid : mainGrid
+    grid = newGrid
     cols = newCols
     rows = newRows
     scrollTop = 0
@@ -1108,13 +917,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     let line = ""
     for (let i = 0; i < row.length; i++) {
       const cell = row[i]!
-      if (cell.wide) {
-        line += cell.char
-      } else if (cell.char === "") {
-        // Skip spacer cells after wide chars, otherwise treat as space
-        if (i > 0 && row[i - 1]?.wide) {
-          continue
-        }
+      if (cell.char === "") {
         line += " "
       } else {
         line += cell.char
@@ -1137,7 +940,6 @@ export function createScreen(opts: ScreenOptions): Screen {
       for (let col = colStart; col < colEnd; col++) {
         const cell = r[col]
         if (!cell) continue
-        if (cell.char === "" && col > 0 && r[col - 1]?.wide) continue // Skip spacer
         line += cell.char || " "
       }
       parts.push(line.replace(/\s+$/, ""))
@@ -1148,22 +950,14 @@ export function createScreen(opts: ScreenOptions): Screen {
 
   function getMode(mode: string): boolean {
     switch (mode) {
-      case "altScreen":
-        return useAltScreen
       case "cursorVisible":
         return curVisible
-      case "bracketedPaste":
-        return bracketedPaste
       case "applicationCursor":
         return applicationCursor
       case "applicationKeypad":
         return applicationKeypad
       case "autoWrap":
         return autoWrap
-      case "mouseTracking":
-        return mouseTracking
-      case "focusTracking":
-        return focusTracking
       case "originMode":
         return originMode
       case "insertMode":

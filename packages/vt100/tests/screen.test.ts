@@ -1,8 +1,8 @@
-import { describe, test, expect } from "vitest"
+import { describe, test, expect, vi } from "vitest"
 import { createVt100Screen, type Vt100Screen } from "../src/index.ts"
 
 /** Helper: create a screen and return it with convenience methods matching test patterns. */
-function createScreen(opts: { cols: number; rows: number; scrollbackLimit?: number }): {
+function createScreen(opts: { cols: number; rows: number; scrollbackLimit?: number; onResponse?: (data: string) => void }): {
   screen: Vt100Screen
   feed: (data: Uint8Array) => void
   getText: () => string
@@ -119,62 +119,55 @@ describe("Vt100Screen", () => {
     expect(cell.bg!.b).toBe(0)
   })
 
-  test("256-color mode detection", () => {
+  test("all 8 standard foreground colors", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 38;5;208 = 256-color orange foreground (index 208)
-    s.feed(new TextEncoder().encode("\x1b[38;5;208mX\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.char).toBe("X")
-    expect(cell.fg).not.toBeNull()
-    // Index 208 = 6x6x6 cube: r=5, g=3, b=0 -> (0xff, 0x87, 0x00)
-    expect(cell.fg!.r).toBe(0xff)
-    expect(cell.fg!.g).toBe(0x87)
-    expect(cell.fg!.b).toBe(0x00)
+    for (let i = 0; i < 8; i++) {
+      s.feed(new TextEncoder().encode(`\x1b[${30 + i}mX`))
+    }
+    // Verify first (black) and last (white) are set
+    const black = s.getCell(0, 0)
+    expect(black.fg).not.toBeNull()
+    expect(black.fg!.r).toBe(0)
+    expect(black.fg!.g).toBe(0)
+    expect(black.fg!.b).toBe(0)
+
+    const white = s.getCell(0, 7)
+    expect(white.fg).not.toBeNull()
+    expect(white.fg!.r).toBe(0xc0)
+    expect(white.fg!.g).toBe(0xc0)
+    expect(white.fg!.b).toBe(0xc0)
   })
 
-  test("truecolor (24-bit) detection", () => {
+  test("all 8 standard background colors", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 38;2;171;205;239 = true color foreground
-    s.feed(new TextEncoder().encode("\x1b[38;2;171;205;239mT\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.char).toBe("T")
-    expect(cell.fg).not.toBeNull()
-    expect(cell.fg!.r).toBe(171)
-    expect(cell.fg!.g).toBe(205)
-    expect(cell.fg!.b).toBe(239)
+    for (let i = 0; i < 8; i++) {
+      s.feed(new TextEncoder().encode(`\x1b[${40 + i}mX`))
+    }
+    const black = s.getCell(0, 0)
+    expect(black.bg).not.toBeNull()
+    expect(black.bg!.r).toBe(0)
+
+    const white = s.getCell(0, 7)
+    expect(white.bg).not.toBeNull()
+    expect(white.bg!.r).toBe(0xc0)
   })
 
-  test("bright foreground colors (90-97)", () => {
+  test("SGR 39 resets foreground to default", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 91 = bright red foreground (ANSI color 9)
-    s.feed(new TextEncoder().encode("\x1b[91mR\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.fg).not.toBeNull()
-    expect(cell.fg!.r).toBe(0xff)
-    expect(cell.fg!.g).toBe(0x00)
-    expect(cell.fg!.b).toBe(0x00)
+    s.feed(new TextEncoder().encode("\x1b[31mR\x1b[39mN"))
+    const red = s.getCell(0, 0)
+    expect(red.fg).not.toBeNull()
+    const normal = s.getCell(0, 1)
+    expect(normal.fg).toBeNull()
   })
 
-  test("256-color background", () => {
+  test("SGR 49 resets background to default", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 48;5;21 = 256-color blue background (index 21)
-    s.feed(new TextEncoder().encode("\x1b[48;5;21mB\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.bg).not.toBeNull()
-    // Index 21 = 6x6x6 cube: r=0, g=0, b=5 -> (0x00, 0x00, 0xff)
-    expect(cell.bg!.r).toBe(0x00)
-    expect(cell.bg!.g).toBe(0x00)
-    expect(cell.bg!.b).toBe(0xff)
-  })
-
-  test("truecolor background", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[48;2;100;150;200mB\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.bg).not.toBeNull()
-    expect(cell.bg!.r).toBe(100)
-    expect(cell.bg!.g).toBe(150)
-    expect(cell.bg!.b).toBe(200)
+    s.feed(new TextEncoder().encode("\x1b[41mR\x1b[49mN"))
+    const red = s.getCell(0, 0)
+    expect(red.bg).not.toBeNull()
+    const normal = s.getCell(0, 1)
+    expect(normal.bg).toBeNull()
   })
 
   // ── Text attributes ──
@@ -191,32 +184,32 @@ describe("Vt100Screen", () => {
     expect(after.bold).toBe(false)
   })
 
-  test("italic attribute detection", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[3mitalic\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.italic).toBe(true)
-  })
-
   test("underline attribute detection", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[4munderlined\x1b[0m"))
     const cell = s.getCell(0, 0)
-    expect(cell.underline).toBe("single")
+    expect(cell.underline).toBe(true)
   })
 
-  test("strikethrough attribute detection", () => {
+  test("SGR 24 turns off underline", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[9mstruck\x1b[0m"))
-    const cell = s.getCell(0, 0)
-    expect(cell.strikethrough).toBe(true)
+    s.feed(new TextEncoder().encode("\x1b[4mU\x1b[24mN"))
+    expect(s.getCell(0, 0).underline).toBe(true)
+    expect(s.getCell(0, 1).underline).toBe(false)
   })
 
-  test("faint/dim attribute detection", () => {
+  test("blink attribute detection (SGR 5)", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[2mdim\x1b[0m"))
+    s.feed(new TextEncoder().encode("\x1b[5mblink\x1b[0m"))
     const cell = s.getCell(0, 0)
-    expect(cell.faint).toBe(true)
+    expect(cell.blink).toBe(true)
+  })
+
+  test("SGR 25 turns off blink", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    s.feed(new TextEncoder().encode("\x1b[5mB\x1b[25mN"))
+    expect(s.getCell(0, 0).blink).toBe(true)
+    expect(s.getCell(0, 1).blink).toBe(false)
   })
 
   test("inverse attribute detection", () => {
@@ -224,6 +217,27 @@ describe("Vt100Screen", () => {
     s.feed(new TextEncoder().encode("\x1b[7minverse\x1b[0m"))
     const cell = s.getCell(0, 0)
     expect(cell.inverse).toBe(true)
+  })
+
+  test("hidden attribute detection (SGR 8)", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    s.feed(new TextEncoder().encode("\x1b[8mhidden\x1b[0m"))
+    const cell = s.getCell(0, 0)
+    expect(cell.hidden).toBe(true)
+  })
+
+  test("SGR 28 turns off hidden", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    s.feed(new TextEncoder().encode("\x1b[8mH\x1b[28mV"))
+    expect(s.getCell(0, 0).hidden).toBe(true)
+    expect(s.getCell(0, 1).hidden).toBe(false)
+  })
+
+  test("SGR 22 turns off bold", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    s.feed(new TextEncoder().encode("\x1b[1mB\x1b[22mN"))
+    expect(s.getCell(0, 0).bold).toBe(true)
+    expect(s.getCell(0, 1).bold).toBe(false)
   })
 
   // ── Cursor ──
@@ -268,32 +282,6 @@ describe("Vt100Screen", () => {
 
   // ── Modes ──
 
-  test("alt screen mode detection", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    expect(s.getMode("altScreen")).toBe(false)
-    // Enter alt screen
-    s.feed(new TextEncoder().encode("\x1b[?1049h"))
-    expect(s.getMode("altScreen")).toBe(true)
-    // Leave alt screen
-    s.feed(new TextEncoder().encode("\x1b[?1049l"))
-    expect(s.getMode("altScreen")).toBe(false)
-  })
-
-  test("bracketed paste mode detection", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    expect(s.getMode("bracketedPaste")).toBe(false)
-    s.feed(new TextEncoder().encode("\x1b[?2004h"))
-    expect(s.getMode("bracketedPaste")).toBe(true)
-  })
-
-  test("mouse tracking mode detection", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    expect(s.getMode("mouseTracking")).toBe(false)
-    // Enable VT200 mouse tracking
-    s.feed(new TextEncoder().encode("\x1b[?1000h"))
-    expect(s.getMode("mouseTracking")).toBe(true)
-  })
-
   test("autowrap mode detection", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     expect(s.getMode("autoWrap")).toBe(true) // Default on
@@ -301,6 +289,111 @@ describe("Vt100Screen", () => {
     expect(s.getMode("autoWrap")).toBe(false)
     s.feed(new TextEncoder().encode("\x1b[?7h"))
     expect(s.getMode("autoWrap")).toBe(true)
+  })
+
+  test("application cursor mode (DECCKM)", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    expect(s.getMode("applicationCursor")).toBe(false)
+    s.feed(new TextEncoder().encode("\x1b[?1h"))
+    expect(s.getMode("applicationCursor")).toBe(true)
+    s.feed(new TextEncoder().encode("\x1b[?1l"))
+    expect(s.getMode("applicationCursor")).toBe(false)
+  })
+
+  test("application keypad mode via DECKPAM/DECKPNM", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    expect(s.getMode("applicationKeypad")).toBe(false)
+    // ESC = (DECKPAM)
+    s.feed(new TextEncoder().encode("\x1b="))
+    expect(s.getMode("applicationKeypad")).toBe(true)
+    // ESC > (DECKPNM)
+    s.feed(new TextEncoder().encode("\x1b>"))
+    expect(s.getMode("applicationKeypad")).toBe(false)
+  })
+
+  test("insert mode (IRM) via standard CSI 4h/4l", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    expect(s.getMode("insertMode")).toBe(false)
+    s.feed(new TextEncoder().encode("\x1b[4h"))
+    expect(s.getMode("insertMode")).toBe(true)
+    s.feed(new TextEncoder().encode("\x1b[4l"))
+    expect(s.getMode("insertMode")).toBe(false)
+  })
+
+  test("reverse video mode (DECSCNM)", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    expect(s.getMode("reverseVideo")).toBe(false)
+    s.feed(new TextEncoder().encode("\x1b[?5h"))
+    expect(s.getMode("reverseVideo")).toBe(true)
+    s.feed(new TextEncoder().encode("\x1b[?5l"))
+    expect(s.getMode("reverseVideo")).toBe(false)
+  })
+
+  // ── Device responses ──
+
+  test("DA1 response (CSI c)", () => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 80, rows: 24, onResponse })
+    s.feed(new TextEncoder().encode("\x1b[c"))
+    expect(onResponse).toHaveBeenCalledWith("\x1b[?1;2c")
+  })
+
+  test("DA1 response with explicit param 0 (CSI 0c)", () => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 80, rows: 24, onResponse })
+    s.feed(new TextEncoder().encode("\x1b[0c"))
+    expect(onResponse).toHaveBeenCalledWith("\x1b[?1;2c")
+  })
+
+  test("DSR device status (CSI 5n)", () => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 80, rows: 24, onResponse })
+    s.feed(new TextEncoder().encode("\x1b[5n"))
+    expect(onResponse).toHaveBeenCalledWith("\x1b[0n")
+  })
+
+  test("DSR cursor position report (CSI 6n)", () => {
+    const onResponse = vi.fn()
+    const s = createScreen({ cols: 80, rows: 24, onResponse })
+    // Move cursor to row 5, col 10 (1-based)
+    s.feed(new TextEncoder().encode("\x1b[5;10H"))
+    s.feed(new TextEncoder().encode("\x1b[6n"))
+    // Response should be 1-based: row 5, col 10
+    expect(onResponse).toHaveBeenCalledWith("\x1b[5;10R")
+  })
+
+  test("DSR/DA1 without onResponse does not crash", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    // Should silently ignore
+    s.feed(new TextEncoder().encode("\x1b[c"))
+    s.feed(new TextEncoder().encode("\x1b[5n"))
+    s.feed(new TextEncoder().encode("\x1b[6n"))
+  })
+
+  // ── DECSTR soft reset ──
+
+  test("DECSTR (CSI ! p) resets modes but not screen", () => {
+    const s = createScreen({ cols: 80, rows: 24 })
+    // Write some content
+    s.feed(new TextEncoder().encode("hello"))
+    // Change some modes
+    s.feed(new TextEncoder().encode("\x1b[?1h")) // application cursor on
+    s.feed(new TextEncoder().encode("\x1b[?25l")) // cursor invisible
+    s.feed(new TextEncoder().encode("\x1b=")) // application keypad on
+    expect(s.getMode("applicationCursor")).toBe(true)
+    expect(s.getCursor().visible).toBe(false)
+    expect(s.getMode("applicationKeypad")).toBe(true)
+
+    // Soft reset
+    s.feed(new TextEncoder().encode("\x1b[!p"))
+
+    // Modes should be reset
+    expect(s.getMode("applicationCursor")).toBe(false)
+    expect(s.getCursor().visible).toBe(true)
+    expect(s.getMode("applicationKeypad")).toBe(false)
+
+    // But content should still be there
+    expect(s.getText()).toContain("hello")
   })
 
   // ── Resize ──
@@ -344,21 +437,6 @@ describe("Vt100Screen", () => {
     // After reset, content should be cleared
     const text = s.getText()
     expect(text.trim()).toBe("")
-  })
-
-  // ── Wide characters ──
-
-  test("feed wide characters (CJK), getCell() has wide=true", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    // CJK character (Chinese "big")
-    s.feed(new TextEncoder().encode("\u5927"))
-    const cell = s.getCell(0, 0)
-    expect(cell.char).toBe("\u5927")
-    expect(cell.wide).toBe(true)
-    // Spacer cell after wide character
-    const spacer = s.getCell(0, 1)
-    expect(spacer.char).toBe("")
-    expect(spacer.wide).toBe(false)
   })
 
   // ── getLine / getLines ──
@@ -406,11 +484,10 @@ describe("Vt100Screen", () => {
     expect(cell.fg).toBeNull()
     expect(cell.bg).toBeNull()
     expect(cell.bold).toBe(false)
-    expect(cell.italic).toBe(false)
-    expect(cell.underline).toBe("none")
-    expect(cell.strikethrough).toBe(false)
+    expect(cell.underline).toBe(false)
+    expect(cell.blink).toBe(false)
     expect(cell.inverse).toBe(false)
-    expect(cell.wide).toBe(false)
+    expect(cell.hidden).toBe(false)
   })
 
   // ── Combined attributes ──
@@ -457,23 +534,6 @@ describe("Vt100Screen", () => {
     const cursor = s.getCursor()
     expect(cursor.x).toBe(0)
     expect(cursor.y).toBe(0)
-  })
-
-  // ── Alternate screen buffer ──
-
-  test("alternate screen preserves main screen content", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("main content"))
-    // Enter alt screen
-    s.feed(new TextEncoder().encode("\x1b[?1049h"))
-    expect(s.getText()).not.toContain("main content")
-    // Write to alt screen
-    s.feed(new TextEncoder().encode("alt content"))
-    expect(s.getText()).toContain("alt content")
-    // Leave alt screen
-    s.feed(new TextEncoder().encode("\x1b[?1049l"))
-    expect(s.getText()).toContain("main content")
-    expect(s.getText()).not.toContain("alt content")
   })
 
   // ── Scroll regions with content ──
@@ -1244,6 +1304,76 @@ describe("Vt100Screen", () => {
       s.feed(new TextEncoder().encode("AB\t"))
       // Tab stops are every 8 cols: from col 2, next is col 8
       expect(s.getCursor().x).toBe(8)
+    })
+
+    test("unknown CSI sequences are silently ignored", () => {
+      const s = createScreen({ cols: 80, rows: 24 })
+      // CSI with unknown final byte
+      s.feed(new TextEncoder().encode("\x1b[99zABC"))
+      // Should not crash, and ABC should render
+      expect(s.getText()).toContain("ABC")
+    })
+
+    test("unknown private modes are silently ignored", () => {
+      const s = createScreen({ cols: 80, rows: 24 })
+      // Modes that vt100.js doesn't handle (e.g., mouse, bracketed paste)
+      s.feed(new TextEncoder().encode("\x1b[?1000h")) // mouse tracking
+      s.feed(new TextEncoder().encode("\x1b[?2004h")) // bracketed paste
+      s.feed(new TextEncoder().encode("\x1b[?1049h")) // alt screen
+      // None of these should crash
+      s.feed(new TextEncoder().encode("ABC"))
+      expect(s.getText()).toContain("ABC")
+    })
+
+    test("256-color and truecolor SGR sequences are silently ignored", () => {
+      const s = createScreen({ cols: 80, rows: 24 })
+      // These sequences should not crash, just be ignored
+      s.feed(new TextEncoder().encode("\x1b[38;5;208mX\x1b[0m"))
+      s.feed(new TextEncoder().encode("\x1b[38;2;100;200;50mY\x1b[0m"))
+      const cellX = s.getCell(0, 0)
+      expect(cellX.char).toBe("X")
+      // fg should be null since we don't parse extended colors
+      expect(cellX.fg).toBeNull()
+    })
+  })
+
+  // ── ESC sequences ──
+
+  describe("escape sequences", () => {
+    test("IND (ESC D) moves cursor down, scrolls at bottom", () => {
+      const s = createScreen({ cols: 10, rows: 3 })
+      s.feed(new TextEncoder().encode("LINE0\r\n"))
+      s.feed(new TextEncoder().encode("LINE1\r\n"))
+      s.feed(new TextEncoder().encode("LINE2"))
+      // Cursor at row 2. ESC D should scroll
+      s.feed(new TextEncoder().encode("\x1bD"))
+      expect(s.getCursor().y).toBe(2)
+    })
+
+    test("RI (ESC M) moves cursor up, scrolls at top", () => {
+      const s = createScreen({ cols: 10, rows: 3 })
+      // Cursor at row 0. ESC M should scroll down
+      s.feed(new TextEncoder().encode("\x1bM"))
+      expect(s.getCursor().y).toBe(0)
+    })
+
+    test("NEL (ESC E) moves to next line col 0", () => {
+      const s = createScreen({ cols: 10, rows: 3 })
+      s.feed(new TextEncoder().encode("ABC"))
+      s.feed(new TextEncoder().encode("\x1bE"))
+      expect(s.getCursor().x).toBe(0)
+      expect(s.getCursor().y).toBe(1)
+    })
+
+    test("RIS (ESC c) performs full reset", () => {
+      const s = createScreen({ cols: 80, rows: 24 })
+      s.feed(new TextEncoder().encode("content"))
+      s.feed(new TextEncoder().encode("\x1b[?1h")) // application cursor on
+      s.feed(new TextEncoder().encode("\x1bc")) // RIS
+      expect(s.getText().trim()).toBe("")
+      expect(s.getMode("applicationCursor")).toBe(false)
+      expect(s.getCursor().x).toBe(0)
+      expect(s.getCursor().y).toBe(0)
     })
   })
 })

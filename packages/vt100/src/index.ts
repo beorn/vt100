@@ -4,5 +4,4 @@ export {
   type ScreenOptions as Vt100ScreenOptions,
   type ScreenCell,
   type CellColor,
-  type UnderlineStyle,
 } from "./screen.ts"
