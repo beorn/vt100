@@ -101,6 +101,9 @@ export interface Screen {
 
   getTitle(): string
   getMode(mode: string): boolean
+  getClipboard(): string
+  getCwd(): string
+  getNotifications(): string[]
 
   getScrollbackLength(): number
   getViewportOffset(): number
@@ -376,10 +379,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let syncOutput = false
 
   // Kitty keyboard protocol
+  // Headless design: we implement the full push/pop/query state machine so that
+  // applications can negotiate keyboard encoding modes. The flags are stored and
+  // queryable (CSI ? u responds correctly), and a host can read them to decide
+  // how to encode keypresses. The actual key encoding lives in the host layer
+  // (e.g. termless's encodeKeyToAnsi), not here — separation of concerns.
   let kittyKeyboardFlags = 0
   let kittyKeyboardStack: number[] = []
 
   // Kitty graphics protocol
+  // Headless design: we parse the APC G protocol and respond to queries so that
+  // applications relying on the query→response handshake work correctly. We don't
+  // store image data because there's no pixel framebuffer — unlike sixel where we
+  // preserve the raw data for consumers, kitty graphics payloads are chunked and
+  // stateful, making storage without rendering impractical.
   let hasKittyGraphics = false
 
   // Scroll region (inclusive, 0-based)
@@ -395,10 +408,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Clipboard (OSC 52)
   let clipboard = ""
 
-  // Semantic prompt zones (OSC 133)
+  // Current working directory (OSC 7)
+  let cwd = ""
+
+  // Notifications (OSC 9)
+  let notifications: string[] = []
+
+  // Semantic prompt zones (OSC 133 / OSC 633)
   let semanticZones: SemanticZone[] = []
 
   // Sixel graphics (DCS q)
+  // Headless design: we parse sixel data and store it for consumers (e.g. a GUI
+  // renderer could use getSixelImages() to display them). We don't decode pixels
+  // because there's no framebuffer to render into — but preserving the data means
+  // a host application gets full fidelity without re-parsing the stream.
   let hasSixel = false
   let sixelImages: SixelImage[] = []
 
@@ -879,6 +902,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "c": // DA1 - Primary Device Attributes
         if (onResponse) {
           if (params === "" || params === "0") {
+            // VT200 (62) + sixel (4). We include sixel because we parse and
+            // preserve sixel data via getSixelImages() — applications checking
+            // DA1 for sixel support before sending image data will work correctly.
             onResponse("\x1b[?62;4c")
           }
         }
@@ -1501,6 +1527,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       }
       case 1: // Set icon name (ignore)
         break
+      case 7: // Current working directory: OSC 7 ; file://host/path ST
+        cwd = value
+        break
       case 8: {
         // Hyperlink: OSC 8 ; params ; url ST
         // Format: 8;params;url  or  8;;url  or 8;;  (close)
@@ -1546,6 +1575,34 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             }
           }
         }
+        break
+      }
+      case 9: // Notifications: OSC 9 ; message ST (iTerm2/ConEmu convention)
+        notifications.push(value)
+        break
+      case 633: {
+        // VS Code shell integration (OSC 633 is a superset of OSC 133)
+        // Maps to the same semantic zone model as FinalTerm markers.
+        const marker = value.charAt(0)
+        switch (marker) {
+          case "A":
+            semanticZones.push({ type: "prompt", startRow: curY, startCol: curX })
+            break
+          case "B":
+            semanticZones.push({ type: "command", startRow: curY, startCol: curX })
+            break
+          case "C":
+            semanticZones.push({ type: "output", startRow: curY, startCol: curX })
+            break
+          case "D":
+            break
+        }
+        break
+      }
+      case 1337: {
+        // iTerm2 proprietary sequences (inline images, etc.)
+        // Headless design: we don't render images, but we don't corrupt the
+        // surrounding text stream either — the sequence is fully consumed.
         break
       }
     }
@@ -1695,6 +1752,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     viewportOffset = 0
     charsetG0 = false
     clipboard = ""
+    cwd = ""
+    notifications = []
     lastChar = ""
     pendingRegionalIndicator = null
     afterZWJ = false
@@ -2249,6 +2308,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     getCursorBlinking: () => cursorBlinking,
     getTitle: () => title,
     getMode,
+    getClipboard: () => clipboard,
+    getCwd: () => cwd,
+    getNotifications: () => [...notifications],
     getScrollbackLength: () => scrollback.length,
     getViewportOffset: () => viewportOffset,
     scrollViewport: (delta: number) => {

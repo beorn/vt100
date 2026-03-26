@@ -62,6 +62,6 @@ Both packages share the same API shape:
 ```typescript
 const screen = createVt100Screen({ cols: 80, rows: 24 }) // or createVtermScreen
 screen.process(new TextEncoder().encode("\x1b[1mHello\x1b[0m"))
-screen.getText()        // Plain text content
+screen.getText() // Plain text content
 screen.getCell(row, col) // Per-cell attributes (fg, bg, bold, etc.)
 ```
