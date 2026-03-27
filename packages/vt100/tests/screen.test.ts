@@ -2,7 +2,12 @@ import { describe, test, expect, vi } from "vitest"
 import { createVt100Screen, type Vt100Screen } from "../src/index.ts"
 
 /** Helper: create a screen and return it with convenience methods matching test patterns. */
-function createScreen(opts: { cols: number; rows: number; scrollbackLimit?: number; onResponse?: (data: string) => void }): {
+function createScreen(opts: {
+  cols: number
+  rows: number
+  scrollbackLimit?: number
+  onResponse?: (data: string) => void
+}): {
   screen: Vt100Screen
   feed: (data: Uint8Array) => void
   getText: () => string
