@@ -1185,29 +1185,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
           break
-        case 9: // X10 mouse tracking
-          mouseTracking = set
-          mouseTrackingMode = set ? 9 : 0
-          break
+        case 9: // X10 mouse
         case 1000: // Mouse tracking (basic)
-          mouseTracking = set
-          mouseTrackingMode = set ? 1000 : 0
-          break
         case 1002: // Mouse tracking (button events)
-          mouseTracking = set
-          mouseTrackingMode = set ? 1002 : 0
-          break
         case 1003: // Mouse tracking (all events)
-          mouseTracking = set
-          mouseTrackingMode = set ? 1003 : 0
-          break
         case 1015: // urxvt mouse encoding
-          mouseTracking = set
-          mouseTrackingMode = set ? 1015 : 0
-          break
         case 1016: // SGR pixel mouse
           mouseTracking = set
-          mouseTrackingMode = set ? 1016 : 0
+          mouseTrackingMode = set ? code : 0
           break
         case 1004: // Focus tracking
           focusTracking = set
