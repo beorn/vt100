@@ -2,7 +2,7 @@
   "name": "vterm",
   "version": "0.0.1",
   "private": true,
-  "description": "VT terminal emulator monorepo — vt100.js (VT100-era) + vterm.js (modern, full standards coverage)",
+  "description": "VT terminal emulator monorepo — vt100.js (strict VT100) + vt220.js (VT220) + vterm.js (modern)",
   "homepage": "https://github.com/beorn/vterm",
   "license": "MIT",
   "author": "Beorn",

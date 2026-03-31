@@ -96,86 +96,37 @@ describe("Vt100Screen", () => {
     expect(text).toContain("line3")
   })
 
-  // ── Colors ──
+  // ── Monochrome — colors ignored ──
 
-  test("feed ANSI color codes, getCell() has correct fg color", () => {
+  test("color codes are silently ignored (VT100 is monochrome)", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 31 = red foreground (ANSI color 1)
+    // SGR 31 = red foreground — VT100 ignores this
     s.feed(new TextEncoder().encode("\x1b[31mR\x1b[0m"))
     const cell = s.getCell(0, 0)
     expect(cell.char).toBe("R")
-    expect(cell.fg).not.toBeNull()
-    // ANSI color 1 = { r: 0x80, g: 0, b: 0 }
-    expect(cell.fg!.r).toBe(0x80)
-    expect(cell.fg!.g).toBe(0)
-    expect(cell.fg!.b).toBe(0)
+    // fg should be null since VT100 is monochrome
+    expect(cell.fg).toBeNull()
+    expect(cell.bg).toBeNull()
   })
 
-  test("feed text with background color, getCell() has correct bg", () => {
+  test("background color codes are silently ignored", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // SGR 42 = green background (ANSI color 2)
+    // SGR 42 = green background — VT100 ignores this
     s.feed(new TextEncoder().encode("\x1b[42mG\x1b[0m"))
     const cell = s.getCell(0, 0)
     expect(cell.char).toBe("G")
-    expect(cell.bg).not.toBeNull()
-    // ANSI color 2 = { r: 0, g: 0x80, b: 0 }
-    expect(cell.bg!.r).toBe(0)
-    expect(cell.bg!.g).toBe(0x80)
-    expect(cell.bg!.b).toBe(0)
+    expect(cell.bg).toBeNull()
   })
 
-  test("all 8 standard foreground colors", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    for (let i = 0; i < 8; i++) {
-      s.feed(new TextEncoder().encode(`\x1b[${30 + i}mX`))
-    }
-    // Verify first (black) and last (white) are set
-    const black = s.getCell(0, 0)
-    expect(black.fg).not.toBeNull()
-    expect(black.fg!.r).toBe(0)
-    expect(black.fg!.g).toBe(0)
-    expect(black.fg!.b).toBe(0)
-
-    const white = s.getCell(0, 7)
-    expect(white.fg).not.toBeNull()
-    expect(white.fg!.r).toBe(0xc0)
-    expect(white.fg!.g).toBe(0xc0)
-    expect(white.fg!.b).toBe(0xc0)
-  })
-
-  test("all 8 standard background colors", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    for (let i = 0; i < 8; i++) {
-      s.feed(new TextEncoder().encode(`\x1b[${40 + i}mX`))
-    }
-    const black = s.getCell(0, 0)
-    expect(black.bg).not.toBeNull()
-    expect(black.bg!.r).toBe(0)
-
-    const white = s.getCell(0, 7)
-    expect(white.bg).not.toBeNull()
-    expect(white.bg!.r).toBe(0xc0)
-  })
-
-  test("SGR 39 resets foreground to default", () => {
+  test("SGR 39/49 (default fg/bg) are silently ignored too", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     s.feed(new TextEncoder().encode("\x1b[31mR\x1b[39mN"))
-    const red = s.getCell(0, 0)
-    expect(red.fg).not.toBeNull()
-    const normal = s.getCell(0, 1)
-    expect(normal.fg).toBeNull()
+    // Both cells should have null fg
+    expect(s.getCell(0, 0).fg).toBeNull()
+    expect(s.getCell(0, 1).fg).toBeNull()
   })
 
-  test("SGR 49 resets background to default", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[41mR\x1b[49mN"))
-    const red = s.getCell(0, 0)
-    expect(red.bg).not.toBeNull()
-    const normal = s.getCell(0, 1)
-    expect(normal.bg).toBeNull()
-  })
-
-  // ── Text attributes ──
+  // ── Text attributes (VT100 subset) ──
 
   test("feed bold text, getCell() has bold=true", () => {
     const s = createScreen({ cols: 80, rows: 24 })
@@ -224,18 +175,12 @@ describe("Vt100Screen", () => {
     expect(cell.inverse).toBe(true)
   })
 
-  test("hidden attribute detection (SGR 8)", () => {
+  test("hidden attribute is NOT supported (VT100 has no conceal)", () => {
     const s = createScreen({ cols: 80, rows: 24 })
+    // SGR 8 (hidden) is a VT220 feature — VT100 ignores it
     s.feed(new TextEncoder().encode("\x1b[8mhidden\x1b[0m"))
     const cell = s.getCell(0, 0)
-    expect(cell.hidden).toBe(true)
-  })
-
-  test("SGR 28 turns off hidden", () => {
-    const s = createScreen({ cols: 80, rows: 24 })
-    s.feed(new TextEncoder().encode("\x1b[8mH\x1b[28mV"))
-    expect(s.getCell(0, 0).hidden).toBe(true)
-    expect(s.getCell(0, 1).hidden).toBe(false)
+    expect(cell.hidden).toBe(false)
   })
 
   test("SGR 22 turns off bold", () => {
@@ -316,12 +261,11 @@ describe("Vt100Screen", () => {
     expect(s.getMode("applicationKeypad")).toBe(false)
   })
 
-  test("insert mode (IRM) via standard CSI 4h/4l", () => {
+  test("insertMode is NOT available (VT100 has no IRM)", () => {
     const s = createScreen({ cols: 80, rows: 24 })
     expect(s.getMode("insertMode")).toBe(false)
+    // CSI 4h is VT102/VT220 — VT100 ignores it
     s.feed(new TextEncoder().encode("\x1b[4h"))
-    expect(s.getMode("insertMode")).toBe(true)
-    s.feed(new TextEncoder().encode("\x1b[4l"))
     expect(s.getMode("insertMode")).toBe(false)
   })
 
@@ -336,7 +280,7 @@ describe("Vt100Screen", () => {
 
   // ── Device responses ──
 
-  test("DA1 response (CSI c)", () => {
+  test("DA1 response (CSI c) — VT100 with AVO", () => {
     const onResponse = vi.fn()
     const s = createScreen({ cols: 80, rows: 24, onResponse })
     s.feed(new TextEncoder().encode("\x1b[c"))
@@ -375,29 +319,17 @@ describe("Vt100Screen", () => {
     s.feed(new TextEncoder().encode("\x1b[6n"))
   })
 
-  // ── DECSTR soft reset ──
+  // ── No DECSTR (VT220 feature) ──
 
-  test("DECSTR (CSI ! p) resets modes but not screen", () => {
+  test("DECSTR (CSI ! p) is silently ignored", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // Write some content
     s.feed(new TextEncoder().encode("hello"))
-    // Change some modes
     s.feed(new TextEncoder().encode("\x1b[?1h")) // application cursor on
-    s.feed(new TextEncoder().encode("\x1b[?25l")) // cursor invisible
-    s.feed(new TextEncoder().encode("\x1b=")) // application keypad on
-    expect(s.getMode("applicationCursor")).toBe(true)
-    expect(s.getCursor().visible).toBe(false)
-    expect(s.getMode("applicationKeypad")).toBe(true)
-
-    // Soft reset
+    // DECSTR — VT100 ignores this
     s.feed(new TextEncoder().encode("\x1b[!p"))
-
-    // Modes should be reset
-    expect(s.getMode("applicationCursor")).toBe(false)
-    expect(s.getCursor().visible).toBe(true)
-    expect(s.getMode("applicationKeypad")).toBe(false)
-
-    // But content should still be there
+    // Mode should NOT be reset (DECSTR not supported)
+    expect(s.getMode("applicationCursor")).toBe(true)
+    // Content should still be there
     expect(s.getText()).toContain("hello")
   })
 
@@ -495,17 +427,17 @@ describe("Vt100Screen", () => {
     expect(cell.hidden).toBe(false)
   })
 
-  // ── Combined attributes ──
+  // ── Combined attributes (bold only — no colors in VT100) ──
 
-  test("combined bold + color attributes", () => {
+  test("combined bold + underline attributes", () => {
     const s = createScreen({ cols: 80, rows: 24 })
-    // Bold + red foreground
-    s.feed(new TextEncoder().encode("\x1b[1;31mX\x1b[0m"))
+    s.feed(new TextEncoder().encode("\x1b[1;4mX\x1b[0m"))
     const cell = s.getCell(0, 0)
     expect(cell.char).toBe("X")
     expect(cell.bold).toBe(true)
-    expect(cell.fg).not.toBeNull()
-    expect(cell.fg!.r).toBe(0x80)
+    expect(cell.underline).toBe(true)
+    // Color is ignored in VT100
+    expect(cell.fg).toBeNull()
   })
 
   // ── Erase commands ──
@@ -527,6 +459,26 @@ describe("Vt100Screen", () => {
     const text = s.getText()
     expect(text).toContain("hello")
     expect(text).not.toContain("world")
+  })
+
+  // ── No ICH/DCH/IL/DL (VT102/VT220 features) ──
+
+  test("ICH/DCH/IL/DL are silently ignored", () => {
+    const s = createScreen({ cols: 10, rows: 3 })
+    s.feed(new TextEncoder().encode("ABCDE"))
+
+    // Move cursor to col 1
+    s.feed(new TextEncoder().encode("\x1b[1;2H"))
+
+    // DCH (CSI P) — should be ignored
+    s.feed(new TextEncoder().encode("\x1b[2P"))
+    // Text should be unchanged
+    const line = s.getLine(0)
+    expect(line[0]!.char).toBe("A")
+    expect(line[1]!.char).toBe("B")
+    expect(line[2]!.char).toBe("C")
+    expect(line[3]!.char).toBe("D")
+    expect(line[4]!.char).toBe("E")
   })
 
   // ── Scroll region ──
@@ -874,199 +826,6 @@ describe("Vt100Screen", () => {
     })
   })
 
-  // ── Insert/delete characters ──
-
-  describe("insert/delete characters", () => {
-    test("DCH deletes characters at cursor position", () => {
-      const s = createScreen({ cols: 10, rows: 3 })
-      s.feed(new TextEncoder().encode("ABCDE"))
-
-      // Move cursor to col 1 (B)
-      s.feed(new TextEncoder().encode("\x1b[1;2H"))
-      // Delete 2 characters (CSI 2 P)
-      s.feed(new TextEncoder().encode("\x1b[2P"))
-
-      // Row should now be: A D E _ _ ...
-      const line = s.getLine(0)
-      expect(line[0]!.char).toBe("A")
-      expect(line[1]!.char).toBe("D")
-      expect(line[2]!.char).toBe("E")
-      // Remaining should be blank
-      expect(line[3]!.char).toBe("")
-      expect(line[4]!.char).toBe("")
-    })
-
-    test("ICH inserts blank characters at cursor position", () => {
-      const s = createScreen({ cols: 10, rows: 3 })
-      s.feed(new TextEncoder().encode("ABCDE"))
-
-      // Move cursor to col 2 (C)
-      s.feed(new TextEncoder().encode("\x1b[1;3H"))
-      // Insert 2 blank characters (CSI 2 @)
-      s.feed(new TextEncoder().encode("\x1b[2@"))
-
-      // Row should now be: A B _ _ C D E _ _ _
-      const line = s.getLine(0)
-      expect(line[0]!.char).toBe("A")
-      expect(line[1]!.char).toBe("B")
-      expect(line[2]!.char).toBe("") // inserted blank
-      expect(line[3]!.char).toBe("") // inserted blank
-      expect(line[4]!.char).toBe("C")
-      expect(line[5]!.char).toBe("D")
-      expect(line[6]!.char).toBe("E")
-    })
-
-    test("DCH at end of line deletes remaining chars", () => {
-      const s = createScreen({ cols: 10, rows: 3 })
-      s.feed(new TextEncoder().encode("ABCDE"))
-      // Move to col 3 (D)
-      s.feed(new TextEncoder().encode("\x1b[1;4H"))
-      // Delete 5 chars (more than remaining)
-      s.feed(new TextEncoder().encode("\x1b[5P"))
-      const line = s.getLine(0)
-      expect(line[0]!.char).toBe("A")
-      expect(line[1]!.char).toBe("B")
-      expect(line[2]!.char).toBe("C")
-      // D and E should be gone, replaced by blanks
-      expect(line[3]!.char).toBe("")
-    })
-
-    test("ICH shifts characters off the right edge", () => {
-      const s = createScreen({ cols: 5, rows: 1 })
-      s.feed(new TextEncoder().encode("ABCDE"))
-      // Move to col 0
-      s.feed(new TextEncoder().encode("\x1b[1;1H"))
-      // Insert 2 blanks
-      s.feed(new TextEncoder().encode("\x1b[2@"))
-      // Row should be: _ _ A B C (D and E pushed off)
-      const line = s.getLine(0)
-      expect(line[0]!.char).toBe("")
-      expect(line[1]!.char).toBe("")
-      expect(line[2]!.char).toBe("A")
-      expect(line[3]!.char).toBe("B")
-      expect(line[4]!.char).toBe("C")
-    })
-  })
-
-  // ── Insert/delete lines ──
-
-  describe("insert/delete lines", () => {
-    test("IL inserts a blank line at cursor, pushes content down", () => {
-      const s = createScreen({ cols: 10, rows: 5 })
-      const enc = (str: string) => new TextEncoder().encode(str)
-
-      s.feed(enc("LINE0\r\n"))
-      s.feed(enc("LINE1\r\n"))
-      s.feed(enc("LINE2\r\n"))
-      s.feed(enc("LINE3\r\n"))
-      s.feed(enc("LINE4"))
-
-      // Move cursor to row 1
-      s.feed(enc("\x1b[2;1H"))
-      // Insert 1 line (CSI L)
-      s.feed(enc("\x1b[L"))
-
-      // Row 0 should still be LINE0
-      const line0 = s.getLine(0)
-      expect(line0[0]!.char).toBe("L")
-      expect(line0[1]!.char).toBe("I")
-      expect(line0[2]!.char).toBe("N")
-      expect(line0[3]!.char).toBe("E")
-      expect(line0[4]!.char).toBe("0")
-
-      // Row 1 should be blank (inserted)
-      const line1 = s.getLine(1)
-      expect(line1[0]!.char).toBe("")
-
-      // Row 2 should now have LINE1 (pushed down from row 1)
-      const line2 = s.getLine(2)
-      expect(line2[0]!.char).toBe("L")
-      expect(line2[1]!.char).toBe("I")
-      expect(line2[2]!.char).toBe("N")
-      expect(line2[3]!.char).toBe("E")
-      expect(line2[4]!.char).toBe("1")
-    })
-
-    test("DL deletes line at cursor, pulls content up", () => {
-      const s = createScreen({ cols: 10, rows: 5 })
-      const enc = (str: string) => new TextEncoder().encode(str)
-
-      s.feed(enc("LINE0\r\n"))
-      s.feed(enc("LINE1\r\n"))
-      s.feed(enc("LINE2\r\n"))
-      s.feed(enc("LINE3\r\n"))
-      s.feed(enc("LINE4"))
-
-      // Move cursor to row 1
-      s.feed(enc("\x1b[2;1H"))
-      // Delete 1 line (CSI M)
-      s.feed(enc("\x1b[M"))
-
-      // Row 0 should still be LINE0
-      const line0 = s.getLine(0)
-      expect(line0[0]!.char).toBe("L")
-      expect(line0[4]!.char).toBe("0")
-
-      // Row 1 should now have LINE2 (pulled up)
-      const line1 = s.getLine(1)
-      expect(line1[0]!.char).toBe("L")
-      expect(line1[4]!.char).toBe("2")
-
-      // Last row should be blank (new row pushed in from bottom)
-      const lastLine = s.getLine(4)
-      expect(lastLine[0]!.char).toBe("")
-    })
-
-    test("IL with count inserts multiple lines", () => {
-      const s = createScreen({ cols: 10, rows: 5 })
-      const enc = (str: string) => new TextEncoder().encode(str)
-
-      s.feed(enc("LINE0\r\n"))
-      s.feed(enc("LINE1\r\n"))
-      s.feed(enc("LINE2\r\n"))
-      s.feed(enc("LINE3\r\n"))
-      s.feed(enc("LINE4"))
-
-      // Move to row 1, insert 2 lines
-      s.feed(enc("\x1b[2;1H"))
-      s.feed(enc("\x1b[2L"))
-
-      // Row 0: LINE0 (unchanged)
-      expect(s.getLine(0)[4]!.char).toBe("0")
-      // Row 1: blank (inserted)
-      expect(s.getLine(1)[0]!.char).toBe("")
-      // Row 2: blank (inserted)
-      expect(s.getLine(2)[0]!.char).toBe("")
-      // Row 3: LINE1 (pushed down from row 1)
-      expect(s.getLine(3)[4]!.char).toBe("1")
-    })
-
-    test("DL with count deletes multiple lines", () => {
-      const s = createScreen({ cols: 10, rows: 5 })
-      const enc = (str: string) => new TextEncoder().encode(str)
-
-      s.feed(enc("LINE0\r\n"))
-      s.feed(enc("LINE1\r\n"))
-      s.feed(enc("LINE2\r\n"))
-      s.feed(enc("LINE3\r\n"))
-      s.feed(enc("LINE4"))
-
-      // Move to row 1, delete 2 lines
-      s.feed(enc("\x1b[2;1H"))
-      s.feed(enc("\x1b[2M"))
-
-      // Row 0: LINE0 (unchanged)
-      expect(s.getLine(0)[4]!.char).toBe("0")
-      // Row 1: LINE3 (pulled up past deleted LINE1 and LINE2)
-      expect(s.getLine(1)[4]!.char).toBe("3")
-      // Row 2: LINE4 (pulled up)
-      expect(s.getLine(2)[4]!.char).toBe("4")
-      // Row 3 and 4: blank
-      expect(s.getLine(3)[0]!.char).toBe("")
-      expect(s.getLine(4)[0]!.char).toBe("")
-    })
-  })
-
   // ── scrollViewport() ──
 
   describe("scrollViewport", () => {
@@ -1210,24 +969,19 @@ describe("Vt100Screen", () => {
       // ESC followed by an invalid char -- should return to ground state
       s.feed(new TextEncoder().encode("\x1b!hello"))
       // The "hello" after the malformed escape should still render
-      // (ESC ! is unknown, parser returns to ground, then processes remaining chars)
       const text = s.getText()
       expect(text).toContain("hello")
     })
 
     test("incomplete CSI sequence followed by text", () => {
       const s = createScreen({ cols: 80, rows: 24 })
-      // Start a CSI but then feed a regular printable (which is the final byte)
-      s.feed(new TextEncoder().encode("\x1b[m"))
-      // ESC [ m is actually a valid SGR reset -- but let's test with truly incomplete:
       // Feed CSI with just params, then a final byte in a separate feed
-      s.feed(new TextEncoder().encode("\x1b[31"))
+      s.feed(new TextEncoder().encode("\x1b[1"))
       // Now the parser is in CSI state waiting for final byte
-      s.feed(new TextEncoder().encode("mRedText\x1b[0m"))
+      s.feed(new TextEncoder().encode("mBoldText\x1b[0m"))
       const cell = s.getCell(0, 0)
-      expect(cell.char).toBe("R")
-      expect(cell.fg).not.toBeNull()
-      expect(cell.fg!.r).toBe(0x80)
+      expect(cell.char).toBe("B")
+      expect(cell.bold).toBe(true)
     })
 
     test("getCell with out-of-bounds returns empty cell", () => {
@@ -1253,7 +1007,6 @@ describe("Vt100Screen", () => {
       const s = createScreen({ cols: 80, rows: 24 })
       s.feed(new TextEncoder().encode("\x1b[5;20H")) // move to col 19
       s.feed(new TextEncoder().encode("\x1b[0G")) // CHA 0 -> treated as 1
-      // 0 is parsed as 0, (0-1) = -1, clamped to 0
       expect(s.getCursor().x).toBe(0)
     })
 
@@ -1337,7 +1090,7 @@ describe("Vt100Screen", () => {
       s.feed(new TextEncoder().encode("\x1b[38;2;100;200;50mY\x1b[0m"))
       const cellX = s.getCell(0, 0)
       expect(cellX.char).toBe("X")
-      // fg should be null since we don't parse extended colors
+      // fg should be null since VT100 is monochrome
       expect(cellX.fg).toBeNull()
     })
   })

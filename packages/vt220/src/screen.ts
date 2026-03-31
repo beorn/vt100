@@ -1,14 +1,13 @@
 /**
- * Pure TypeScript VT100 terminal emulator.
+ * Pure TypeScript VT220 terminal emulator.
  *
- * Strict DEC VT100 (1978) implementation: monochrome display, cursor movement,
- * scroll regions, auto-wrap, origin mode, DEC special graphics charset.
- * SGR supports bold, underline, blink, and reverse — NO colors (VT100 is
- * monochrome). No insert mode, no insert/delete chars/lines — those are
- * VT102/VT220 features.
+ * Extends VT100 with VT220 features: 8 standard colors (SGR 30-37/40-47),
+ * insert/replace mode (IRM), insert/delete characters (ICH/DCH),
+ * insert/delete lines (IL/DL), erase characters (ECH), selective erase
+ * (DECSED/DECSEL), hidden/conceal (SGR 8/28), and soft reset (DECSTR).
  *
- * Zero dependencies. For colors and VT220 features, use vt220.js.
- * For truecolor, 256 colors, and wide chars, use vterm.js.
+ * Zero dependencies. No truecolor, no 256 colors, no wide chars —
+ * those belong in vterm.js.
  */
 
 // ═══════════════════════════════════════════════════════
@@ -49,6 +48,21 @@ function emptyCell(): ScreenCell {
 }
 
 // ═══════════════════════════════════════════════════════
+// ANSI 8-color palette (standard VT220 colors)
+// ═══════════════════════════════════════════════════════
+
+const ANSI_8: readonly CellColor[] = [
+  { r: 0x00, g: 0x00, b: 0x00 }, // 0  Black
+  { r: 0x80, g: 0x00, b: 0x00 }, // 1  Red
+  { r: 0x00, g: 0x80, b: 0x00 }, // 2  Green
+  { r: 0x80, g: 0x80, b: 0x00 }, // 3  Yellow
+  { r: 0x00, g: 0x00, b: 0x80 }, // 4  Blue
+  { r: 0x80, g: 0x00, b: 0x80 }, // 5  Magenta
+  { r: 0x00, g: 0x80, b: 0x80 }, // 6  Cyan
+  { r: 0xc0, g: 0xc0, b: 0xc0 }, // 7  White
+]
+
+// ═══════════════════════════════════════════════════════
 // Screen
 // ═══════════════════════════════════════════════════════
 
@@ -56,7 +70,7 @@ export interface ScreenOptions {
   cols: number
   rows: number
   scrollbackLimit?: number
-  /** Callback for DA1/DSR responses — write these back to the PTY */
+  /** Callback for DA1/DA2/DSR responses — write these back to the PTY */
   onResponse?: (data: string) => void
 }
 
@@ -95,7 +109,7 @@ export function createScreen(opts: ScreenOptions): Screen {
   const scrollbackLimit = opts.scrollbackLimit ?? 1000
   const onResponse = opts.onResponse
 
-  // Main screen buffer (no alternate screen in VT100)
+  // Main screen buffer (no alternate screen in VT220)
   let grid: ScreenCell[][] = makeGrid(cols, rows)
   let scrollback: ScreenCell[][] = []
 
@@ -131,6 +145,7 @@ export function createScreen(opts: ScreenOptions): Screen {
   let applicationKeypad = false
   let autoWrap = true
   let originMode = false
+  let insertMode = false
   let reverseVideo = false
 
   // Scroll region (inclusive, 0-based)
@@ -225,6 +240,13 @@ export function createScreen(opts: ScreenOptions): Screen {
       }
     }
 
+    // Insert mode: shift existing characters right before writing
+    if (insertMode) {
+      const row = grid[curY]!
+      row.splice(curX, 0, EMPTY_CELL)
+      row.pop()
+    }
+
     // Copy-on-write: if cell is the shared EMPTY_CELL sentinel, create a fresh object
     const row = grid[curY]!
     let cell = row[curX]!
@@ -292,6 +314,21 @@ export function createScreen(opts: ScreenOptions): Screen {
       case "K": // EL - Erase in Line
         handleEraseLine(parts[0] ?? 0)
         break
+      case "L": // IL - Insert Lines
+        handleInsertLines(Math.max(parts[0] ?? 1, 1))
+        break
+      case "M": // DL - Delete Lines
+        handleDeleteLines(Math.max(parts[0] ?? 1, 1))
+        break
+      case "P": // DCH - Delete Characters
+        handleDeleteChars(Math.max(parts[0] ?? 1, 1))
+        break
+      case "@": // ICH - Insert Characters
+        handleInsertChars(Math.max(parts[0] ?? 1, 1))
+        break
+      case "X": // ECH - Erase Characters
+        handleEraseChars(Math.max(parts[0] ?? 1, 1))
+        break
       case "S": // SU - Scroll Up
         for (let i = 0; i < Math.max(parts[0] ?? 1, 1); i++) {
           scrollUp(scrollTop, scrollBottom)
@@ -335,8 +372,9 @@ export function createScreen(opts: ScreenOptions): Screen {
       case "c": // DA1 - Primary Device Attributes
         if (onResponse) {
           if (params === "" || params === "0") {
-            // VT100 with Advanced Video Option (AVO)
-            onResponse("\x1b[?1;2c")
+            // VT220: class 2 with features: printer (1), selective erase (2),
+            // user windows (6), horizontal scrolling (7), ANSI color (8), NRCS (9)
+            onResponse("\x1b[?62;1;2;6;7;8;9c")
           }
         }
         break
@@ -355,14 +393,43 @@ export function createScreen(opts: ScreenOptions): Screen {
     }
   }
 
+  function handleCSIWithIntermediate(params: string, intermediate: string, finalByte: string): void {
+    if (intermediate === "!" && finalByte === "p") {
+      // DECSTR - Soft Terminal Reset
+      softReset()
+    } else if (intermediate === ">" && finalByte === "c") {
+      // DA2 - Secondary Device Attributes
+      if (onResponse) {
+        // VT220: type 1, firmware version 10, ROM cartridge 0
+        onResponse("\x1b[>1;10;0c")
+      }
+    }
+    // Unknown intermediate sequences — ignore
+  }
+
   function handleCSIPrivate(params: string, finalByte: string): void {
     const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+
+    if (finalByte === "J") {
+      // DECSED - Selective Erase in Display
+      handleSelectiveEraseDisplay(parts[0] ?? 0)
+      return
+    }
+    if (finalByte === "K") {
+      // DECSEL - Selective Erase in Line
+      handleSelectiveEraseLine(parts[0] ?? 0)
+      return
+    }
+
     const set = finalByte === "h"
 
     for (const code of parts) {
       switch (code) {
         case 1: // DECCKM - Application Cursor
           applicationCursor = set
+          break
+        case 4: // IRM - Insert Mode (via DEC private)
+          insertMode = set
           break
         case 5: // DECSCNM - Reverse Video
           reverseVideo = set
@@ -378,6 +445,20 @@ export function createScreen(opts: ScreenOptions): Screen {
           break
         case 66: // DECNKM - Application Keypad
           applicationKeypad = set
+          break
+      }
+    }
+  }
+
+  // Also handle standard (non-private) set/reset modes: CSI Ps h / CSI Ps l
+  function handleSetResetMode(params: string, finalByte: string): void {
+    const parts = params.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
+    const set = finalByte === "h"
+
+    for (const code of parts) {
+      switch (code) {
+        case 4: // IRM - Insert/Replace Mode
+          insertMode = set
           break
       }
     }
@@ -423,6 +504,19 @@ export function createScreen(opts: ScreenOptions): Screen {
     }
   }
 
+  // ── Selective erase (DECSED/DECSEL) ──
+  // These only erase cells that do NOT have the "protected" attribute.
+  // Since we don't track DECSCA (protected attribute), selective erase
+  // behaves identically to normal erase for now.
+
+  function handleSelectiveEraseDisplay(mode: number): void {
+    handleEraseDisplay(mode)
+  }
+
+  function handleSelectiveEraseLine(mode: number): void {
+    handleEraseLine(mode)
+  }
+
   function eraseCells(row: number, startCol: number, _endRow: number, endCol: number): void {
     const r = grid[row]
     if (!r) return
@@ -431,9 +525,49 @@ export function createScreen(opts: ScreenOptions): Screen {
     }
   }
 
+  function handleInsertLines(count: number): void {
+    if (curY < scrollTop || curY > scrollBottom) return
+    for (let i = 0; i < count; i++) {
+      scrollDown(curY, scrollBottom)
+    }
+  }
+
+  function handleDeleteLines(count: number): void {
+    if (curY < scrollTop || curY > scrollBottom) return
+    for (let i = 0; i < count; i++) {
+      scrollUp(curY, scrollBottom)
+    }
+  }
+
+  function handleDeleteChars(count: number): void {
+    const row = grid[curY]
+    if (!row) return
+    for (let i = 0; i < count; i++) {
+      if (curX < cols) {
+        row.splice(curX, 1)
+        row.push(emptyCell())
+      }
+    }
+  }
+
+  function handleInsertChars(count: number): void {
+    const row = grid[curY]
+    if (!row) return
+    for (let i = 0; i < count; i++) {
+      row.splice(curX, 0, emptyCell())
+      row.pop()
+    }
+  }
+
+  function handleEraseChars(count: number): void {
+    const row = grid[curY]
+    if (!row) return
+    for (let i = 0; i < count && curX + i < cols; i++) {
+      row[curX + i] = emptyCell()
+    }
+  }
+
   // ── SGR (Select Graphic Rendition) ──
-  // VT100 is monochrome: only bold (1), underline (4), blink (5), reverse (7).
-  // Color codes are silently ignored for forward compatibility.
 
   function handleSGR(rawParams: string): void {
     const params = rawParams.split(";").map((s) => (s === "" ? 0 : parseInt(s, 10)))
@@ -462,6 +596,9 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 7:
           attrs.inverse = true
           break
+        case 8: // Hidden/conceal
+          attrs.hidden = true
+          break
         case 22: // Normal intensity (turn off bold)
           attrs.bold = false
           break
@@ -474,8 +611,38 @@ export function createScreen(opts: ScreenOptions): Screen {
         case 27:
           attrs.inverse = false
           break
-        // Color codes silently ignored — VT100 is monochrome
-        // Skip extended color sequences to consume params correctly
+        case 28: // Reveal (turn off hidden/conceal)
+          attrs.hidden = false
+          break
+        // Foreground colors 30-37
+        case 30:
+        case 31:
+        case 32:
+        case 33:
+        case 34:
+        case 35:
+        case 36:
+        case 37:
+          attrs.fg = { ...ANSI_8[code - 30]! }
+          break
+        case 39: // Default foreground
+          attrs.fg = null
+          break
+        // Background colors 40-47
+        case 40:
+        case 41:
+        case 42:
+        case 43:
+        case 44:
+        case 45:
+        case 46:
+        case 47:
+          attrs.bg = { ...ANSI_8[code - 40]! }
+          break
+        case 49: // Default background
+          attrs.bg = null
+          break
+        // Skip extended color sequences (not supported, but must consume params)
         case 38:
         case 48:
           if (i + 1 < params.length && params[i + 1] === 2) {
@@ -484,8 +651,6 @@ export function createScreen(opts: ScreenOptions): Screen {
             i += 2 // skip 38;5;N or 48;5;N
           }
           break
-        // All other SGR codes (colors 30-37, 40-47, 39, 49, 8, 28, etc.)
-        // are silently ignored for forward compatibility
       }
       i++
     }
@@ -627,8 +792,28 @@ export function createScreen(opts: ScreenOptions): Screen {
             // Final byte — dispatch CSI
             if (escBuf.startsWith("?")) {
               handleCSIPrivate(escBuf.substring(1), ch)
+            } else if (ch === "h" || ch === "l") {
+              // Standard set/reset mode (non-private)
+              handleSetResetMode(escBuf, ch)
             } else {
-              handleCSI(escBuf, ch)
+              // Check for intermediate bytes (0x20-0x2F range, e.g., "!" in CSI ! p)
+              // Also check for ">" prefix for DA2 (CSI > c)
+              let intermediateIdx = -1
+              for (let j = 0; j < escBuf.length; j++) {
+                const c = escBuf.charCodeAt(j)
+                if ((c >= 0x20 && c <= 0x2f) || c === 0x3e) {
+                  // 0x3e = '>'
+                  intermediateIdx = j
+                  break
+                }
+              }
+              if (intermediateIdx >= 0) {
+                const paramPart = escBuf.substring(0, intermediateIdx)
+                const intermediatePart = escBuf.substring(intermediateIdx)
+                handleCSIWithIntermediate(paramPart, intermediatePart, ch)
+              } else {
+                handleCSI(escBuf, ch)
+              }
             }
             parserState = "ground"
           } else if (escBuf.length >= 256) {
@@ -690,6 +875,7 @@ export function createScreen(opts: ScreenOptions): Screen {
     applicationKeypad = false
     autoWrap = true
     originMode = false
+    insertMode = false
     reverseVideo = false
     scrollTop = 0
     scrollBottom = rows - 1
@@ -697,6 +883,22 @@ export function createScreen(opts: ScreenOptions): Screen {
     parserState = "ground"
     escBuf = ""
     oscBuf = ""
+  }
+
+  function softReset(): void {
+    attrs = resetAttrs()
+    applicationCursor = false
+    applicationKeypad = false
+    autoWrap = true
+    originMode = false
+    insertMode = false
+    reverseVideo = false
+    curVisible = true
+    scrollTop = 0
+    scrollBottom = rows - 1
+    savedState = { curX: 0, curY: 0, attrs: resetAttrs(), originMode: false, autoWrap: true }
+    savedCurX = 0
+    savedCurY = 0
   }
 
   function resize(newCols: number, newRows: number): void {
@@ -799,6 +1001,8 @@ export function createScreen(opts: ScreenOptions): Screen {
         return autoWrap
       case "originMode":
         return originMode
+      case "insertMode":
+        return insertMode
       case "reverseVideo":
         return reverseVideo
       default:
