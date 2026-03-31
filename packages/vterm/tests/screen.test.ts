@@ -1737,3 +1737,331 @@ describe("sixel graphics", () => {
     expect(images[0]!.data).toBe("")
   })
 })
+
+// ═══════════════════════════════════════════════════════
+// DECLRMM — Left/Right Margin Mode (DECSET ?69)
+// ═══════════════════════════════════════════════════════
+
+describe("DECLRMM — left/right margins", () => {
+  test("mode flag is off by default", () => {
+    const screen = createVtermScreen()
+    expect(screen.getMode("leftRightMargin")).toBe(false)
+  })
+
+  test("DECSET ?69 enables left/right margin mode", () => {
+    const screen = createVtermScreen()
+    screen.process(enc.encode("\x1b[?69h"))
+    expect(screen.getMode("leftRightMargin")).toBe(true)
+  })
+
+  test("DECRST ?69 disables left/right margin mode", () => {
+    const screen = createVtermScreen()
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[?69l"))
+    expect(screen.getMode("leftRightMargin")).toBe(false)
+  })
+
+  test("DECRPM reports mode 69", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    // Query mode 69 (should be off = 2)
+    screen.process(enc.encode("\x1b[?69$p"))
+    expect(responses[0]).toBe("\x1b[?69;2$y")
+    // Enable and query again
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[?69$p"))
+    expect(responses[1]).toBe("\x1b[?69;1$y")
+  })
+
+  test("DECSLRM sets left and right margins when mode enabled", () => {
+    // 20-col screen, set margins to columns 5-15 (1-based)
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("\x1b[?69h")) // Enable DECLRMM
+    screen.process(enc.encode("\x1b[5;15s")) // DECSLRM: left=5, right=15
+
+    // Write text that should wrap at the right margin (col 14, 0-based)
+    // Cursor starts at 0,0 after DECSLRM
+    screen.process(enc.encode("\x1b[1;5H")) // Move cursor to row 1, col 5 (1-based)
+    screen.process(enc.encode("ABCDEFGHIJKLMNO")) // 15 chars, should wrap at col 14
+
+    // First 11 chars fit in cols 4..14 (0-based), then wrap
+    const line0 = screen.getLine(0)
+    expect(line0[4]!.char).toBe("A")
+    expect(line0[14]!.char).toBe("K")
+    // After wrapping, cursor goes to leftMargin (col 4) on next row
+    const line1 = screen.getLine(1)
+    expect(line1[4]!.char).toBe("L")
+  })
+
+  test("CSI s is save-cursor when DECLRMM is off", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    screen.process(enc.encode("ABC"))
+    // CSI s should save cursor (not DECSLRM)
+    screen.process(enc.encode("\x1b[s"))
+    screen.process(enc.encode("DEF"))
+    // CSI u should restore cursor
+    screen.process(enc.encode("\x1b[u"))
+    expect(screen.getCursorPosition()).toEqual({ x: 3, y: 0 })
+  })
+
+  test("erase in line respects left/right margins", () => {
+    const screen = createVtermScreen({ cols: 20, rows: 5 })
+    // Write text across the full line
+    screen.process(enc.encode("01234567890123456789"))
+    // Enable margins
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[5;15s")) // margins at cols 5-15 (1-based)
+    // Move cursor to col 10 (1-based) and erase to end of line
+    screen.process(enc.encode("\x1b[1;10H"))
+    screen.process(enc.encode("\x1b[0K")) // EL 0 — erase cursor to end (within right margin)
+
+    const line = screen.getLine(0)
+    // Cols 0-3 should still have original text
+    expect(line[0]!.char).toBe("0")
+    expect(line[3]!.char).toBe("3")
+    // Col 9 (cursor was at 1-based 10) should be cleared
+    expect(line[9]!.char).toBe("")
+    // Cols within margins should be cleared
+    expect(line[14]!.char).toBe("")
+    // Cols outside right margin should retain original content
+    expect(line[15]!.char).toBe("5")
+    expect(line[19]!.char).toBe("9")
+  })
+
+  test("scroll up within margins only moves margin columns", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 5 })
+    // Set up content
+    screen.process(enc.encode("0123456789"))
+    screen.process(enc.encode("ABCDEFGHIJ"))
+    screen.process(enc.encode("KLMNOPQRST"))
+    // Enable margins cols 3-7 (1-based)
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[3;7s"))
+    // Set scroll region rows 1-3 (1-based)
+    screen.process(enc.encode("\x1b[1;3r"))
+    // Scroll up
+    screen.process(enc.encode("\x1b[S"))
+
+    // Row 0: cols outside margins should keep original content
+    const line0 = screen.getLine(0)
+    expect(line0[0]!.char).toBe("0")
+    expect(line0[1]!.char).toBe("1")
+    // Cols 2-6 (0-based) should have shifted up from row 1
+    expect(line0[2]!.char).toBe("C")
+    expect(line0[6]!.char).toBe("G")
+    // Cols outside right margin keep original
+    expect(line0[7]!.char).toBe("7")
+  })
+
+  test("scroll down within margins only moves margin columns", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 5 })
+    // Set up content
+    screen.process(enc.encode("0123456789"))
+    screen.process(enc.encode("ABCDEFGHIJ"))
+    screen.process(enc.encode("KLMNOPQRST"))
+    // Enable margins cols 3-7 (1-based)
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[3;7s"))
+    // Set scroll region rows 1-3 (1-based)
+    screen.process(enc.encode("\x1b[1;3r"))
+    // Scroll down
+    screen.process(enc.encode("\x1b[T"))
+
+    // Row 0: within margins should be blank (scrolled in)
+    const line0 = screen.getLine(0)
+    expect(line0[0]!.char).toBe("0")
+    expect(line0[1]!.char).toBe("1")
+    expect(line0[2]!.char).toBe("") // Blank from scroll
+    expect(line0[6]!.char).toBe("") // Blank from scroll
+    expect(line0[7]!.char).toBe("7")
+  })
+
+  test("insert chars works within margins", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 3 })
+    screen.process(enc.encode("ABCDEFGHIJ"))
+    // Enable margins
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[3;8s")) // margins at cols 3-8 (1-based)
+    // Move cursor to col 5 (1-based) row 1 and insert a char
+    screen.process(enc.encode("\x1b[1;5H"))
+    screen.process(enc.encode("\x1b[@")) // ICH — insert 1 character
+
+    const line = screen.getLine(0)
+    // Col 0-1 unchanged
+    expect(line[0]!.char).toBe("A")
+    expect(line[1]!.char).toBe("B")
+    // Col 4 (where cursor was) should be blank (inserted)
+    expect(line[4]!.char).toBe("")
+    // Col 5 should be what was at col 4 (shifted right)
+    expect(line[5]!.char).toBe("E")
+    // Cols outside right margin should be unchanged
+    expect(line[8]!.char).toBe("I")
+    expect(line[9]!.char).toBe("J")
+  })
+
+  test("delete chars works within margins", () => {
+    const screen = createVtermScreen({ cols: 10, rows: 3 })
+    screen.process(enc.encode("ABCDEFGHIJ"))
+    // Enable margins
+    screen.process(enc.encode("\x1b[?69h"))
+    screen.process(enc.encode("\x1b[3;8s")) // margins at cols 3-8 (1-based)
+    // Move cursor to col 4 (1-based) row 1 and delete a char
+    screen.process(enc.encode("\x1b[1;4H"))
+    screen.process(enc.encode("\x1b[P")) // DCH — delete 1 character
+
+    const line = screen.getLine(0)
+    // Col 0-1 unchanged
+    expect(line[0]!.char).toBe("A")
+    expect(line[1]!.char).toBe("B")
+    // Col 3 (where cursor was) should now have what was at col 4
+    expect(line[3]!.char).toBe("E")
+    // Right margin position should be blank (shifted in)
+    expect(line[7]!.char).toBe("")
+    // Outside right margin should be unchanged
+    expect(line[8]!.char).toBe("I")
+    expect(line[9]!.char).toBe("J")
+  })
+
+  test("reset clears left/right margin state", () => {
+    const screen = createVtermScreen()
+    screen.process(enc.encode("\x1b[?69h"))
+    expect(screen.getMode("leftRightMargin")).toBe(true)
+    screen.reset()
+    expect(screen.getMode("leftRightMargin")).toBe(false)
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// Color Scheme Reporting (Mode 2031)
+// ═══════════════════════════════════════════════════════
+
+describe("color scheme reporting (mode 2031)", () => {
+  test("mode flag is off by default", () => {
+    const screen = createVtermScreen()
+    expect(screen.getMode("colorSchemeReporting")).toBe(false)
+  })
+
+  test("DECSET ?2031 enables color scheme reporting", () => {
+    const screen = createVtermScreen()
+    screen.process(enc.encode("\x1b[?2031h"))
+    expect(screen.getMode("colorSchemeReporting")).toBe(true)
+  })
+
+  test("DECRST ?2031 disables color scheme reporting", () => {
+    const screen = createVtermScreen()
+    screen.process(enc.encode("\x1b[?2031h"))
+    screen.process(enc.encode("\x1b[?2031l"))
+    expect(screen.getMode("colorSchemeReporting")).toBe(false)
+  })
+
+  test("DECRPM reports mode 2031", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    // Query when off
+    screen.process(enc.encode("\x1b[?2031$p"))
+    expect(responses[0]).toBe("\x1b[?2031;2$y")
+    // Enable and query
+    screen.process(enc.encode("\x1b[?2031h"))
+    screen.process(enc.encode("\x1b[?2031$p"))
+    expect(responses[1]).toBe("\x1b[?2031;1$y")
+  })
+
+  test("DSR 997 responds with dark color scheme", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    // CSI ? 997 n — query color scheme
+    screen.process(enc.encode("\x1b[?997n"))
+    expect(responses[0]).toBe("\x1b[?997;1n") // 1 = dark
+  })
+
+  test("reset clears color scheme reporting", () => {
+    const screen = createVtermScreen()
+    screen.process(enc.encode("\x1b[?2031h"))
+    expect(screen.getMode("colorSchemeReporting")).toBe(true)
+    screen.reset()
+    expect(screen.getMode("colorSchemeReporting")).toBe(false)
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// OSC 66 — Text Sizing
+// ═══════════════════════════════════════════════════════
+
+describe("OSC 66 — text sizing", () => {
+  test("query responds with default scale", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]66;?\x1b\\"))
+    expect(responses[0]).toBe("\x1b]66;s=1\x1b\\")
+  })
+
+  test("set scale and query it back", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    // Set scale to 2
+    screen.process(enc.encode("\x1b]66;s=2\x1b\\"))
+    // Query
+    screen.process(enc.encode("\x1b]66;?\x1b\\"))
+    expect(responses[0]).toBe("\x1b]66;s=2\x1b\\")
+  })
+
+  test("set scale with BEL terminator", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]66;s=3\x07"))
+    screen.process(enc.encode("\x1b]66;?\x07"))
+    expect(responses[0]).toBe("\x1b]66;s=3\x1b\\")
+  })
+
+  test("reset restores default scale", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]66;s=5\x1b\\"))
+    screen.reset()
+    screen.process(enc.encode("\x1b]66;?\x1b\\"))
+    expect(responses[0]).toBe("\x1b]66;s=1\x1b\\")
+  })
+})
+
+// ═══════════════════════════════════════════════════════
+// OSC 5522 — Advanced Clipboard (Kitty protocol)
+// ═══════════════════════════════════════════════════════
+
+describe("OSC 5522 — advanced clipboard", () => {
+  test("store and query clipboard data", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    // Store "hello" (base64: aGVsbG8=)
+    screen.process(enc.encode("\x1b]5522;aGVsbG8=\x1b\\"))
+    // Query
+    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
+    expect(responses[0]).toBe("\x1b]5522;aGVsbG8=\x1b\\")
+  })
+
+  test("query empty clipboard", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
+    // btoa("") === ""
+    expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+  })
+
+  test("store with BEL terminator", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    // Store "test" (base64: dGVzdA==)
+    screen.process(enc.encode("\x1b]5522;dGVzdA==\x07"))
+    // Query
+    screen.process(enc.encode("\x1b]5522;?\x07"))
+    expect(responses[0]).toBe("\x1b]5522;dGVzdA==\x1b\\")
+  })
+
+  test("reset clears advanced clipboard", () => {
+    const responses: string[] = []
+    const screen = createVtermScreen({ onResponse: (r) => responses.push(r) })
+    screen.process(enc.encode("\x1b]5522;aGVsbG8=\x1b\\"))
+    screen.reset()
+    screen.process(enc.encode("\x1b]5522;?\x1b\\"))
+    expect(responses[0]).toBe("\x1b]5522;\x1b\\")
+  })
+})

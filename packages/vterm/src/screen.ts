@@ -399,6 +399,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   let scrollTop = 0
   let scrollBottom = rows - 1
 
+  // Left/right margin mode (DECLRMM, DECSET ?69)
+  let leftRightMarginMode = false
+  let leftMargin = 0
+  let rightMargin = cols - 1
+
+  // Color scheme reporting (mode 2031)
+  let colorSchemeReporting = false
+
+  // Text scale (OSC 66)
+  let textScale = 1
+
+  // Advanced clipboard (OSC 5522 — Kitty clipboard protocol)
+  let advancedClipboard = ""
+
   // Viewport scroll offset
   let viewportOffset = 0
 
@@ -506,28 +520,65 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── Scrolling ──
 
   function scrollUp(top: number, bottom: number): void {
-    // Move top row to scrollback (only if main screen & top of screen)
-    if (grid === mainGrid && top === 0) {
-      scrollback.push(grid[0]!)
-      if (scrollback.length > scrollbackLimit * 2) {
-        scrollback.splice(0, scrollback.length - scrollbackLimit)
+    if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
+      // Scroll only within the left/right margin columns
+      const lm = leftMargin
+      const rm = rightMargin
+      for (let r = top; r < bottom; r++) {
+        const srcRow = grid[r + 1]!
+        const dstRow = grid[r]!
+        for (let c = lm; c <= rm && c < cols; c++) {
+          dstRow[c] = srcRow[c]!
+        }
       }
+      // Clear the bottom row within margins
+      const bottomRow = grid[bottom]!
+      for (let c = lm; c <= rm && c < cols; c++) {
+        bottomRow[c] = EMPTY_CELL
+      }
+    } else {
+      // Full-width scroll
+      // Move top row to scrollback (only if main screen & top of screen)
+      if (grid === mainGrid && top === 0) {
+        scrollback.push(grid[0]!)
+        if (scrollback.length > scrollbackLimit * 2) {
+          scrollback.splice(0, scrollback.length - scrollbackLimit)
+        }
+      }
+      for (let i = top; i < bottom; i++) {
+        grid[i] = grid[i + 1]!
+        softWrapped[i] = softWrapped[i + 1]!
+      }
+      grid[bottom] = makeRow(cols)
+      softWrapped[bottom] = false
     }
-    for (let i = top; i < bottom; i++) {
-      grid[i] = grid[i + 1]!
-      softWrapped[i] = softWrapped[i + 1]!
-    }
-    grid[bottom] = makeRow(cols)
-    softWrapped[bottom] = false
   }
 
   function scrollDown(top: number, bottom: number): void {
-    for (let i = bottom; i > top; i--) {
-      grid[i] = grid[i - 1]!
-      softWrapped[i] = softWrapped[i - 1]!
+    if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
+      // Scroll only within the left/right margin columns
+      const lm = leftMargin
+      const rm = rightMargin
+      for (let r = bottom; r > top; r--) {
+        const srcRow = grid[r - 1]!
+        const dstRow = grid[r]!
+        for (let c = lm; c <= rm && c < cols; c++) {
+          dstRow[c] = srcRow[c]!
+        }
+      }
+      // Clear the top row within margins
+      const topRow = grid[top]!
+      for (let c = lm; c <= rm && c < cols; c++) {
+        topRow[c] = EMPTY_CELL
+      }
+    } else {
+      for (let i = bottom; i > top; i--) {
+        grid[i] = grid[i - 1]!
+        softWrapped[i] = softWrapped[i - 1]!
+      }
+      grid[top] = makeRow(cols)
+      softWrapped[top] = false
     }
-    grid[top] = makeRow(cols)
-    softWrapped[top] = false
   }
 
   // ── Character writing ──
@@ -671,29 +722,33 @@ export function createScreen(options: ScreenOptions = {}): Screen {
 
   function writeCharCore(ch: string, wide: boolean): void {
     const charWidth = wide ? 2 : 1
+    const wrapBoundary = leftRightMarginMode ? rightMargin + 1 : cols
+    const wrapReturn = leftRightMarginMode ? leftMargin : 0
 
-    // Handle autowrap at end of line
-    if (curX + charWidth > cols) {
+    // Handle autowrap at end of line (or right margin)
+    if (curX + charWidth > wrapBoundary) {
       if (autoWrap) {
         // Mark this row as soft-wrapped (auto-wrap caused the line break)
         softWrapped[curY] = true
-        curX = 0
+        curX = wrapReturn
         curY++
         if (curY > scrollBottom) {
           curY = scrollBottom
           scrollUp(scrollTop, scrollBottom)
         }
       } else {
-        curX = cols - charWidth
+        curX = wrapBoundary - charWidth
       }
     }
 
     // Insert mode: shift existing characters right before writing
     if (insertMode) {
       const row = grid[curY]!
+      const insertEnd = leftRightMarginMode ? rightMargin + 1 : cols
       for (let i = 0; i < charWidth; i++) {
+        // Shift cells right within margin, dropping the cell at the right edge
+        row.splice(insertEnd - 1, 1)
         row.splice(curX, 0, EMPTY_CELL)
-        row.pop()
       }
     }
 
@@ -919,9 +974,26 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           if (code === 4) insertMode = false
         }
         break
-      case "s": // SCP - Save Cursor Position
-        savedCurX = curX
-        savedCurY = curY
+      case "s": // SCP - Save Cursor Position / DECSLRM when left/right margin mode active
+        if (leftRightMarginMode && intermediates === "") {
+          // DECSLRM - Set Left and Right Margins (1-based params)
+          const pl = parts[0] ?? 0
+          const pr = parts[1] ?? 0
+          leftMargin = pl > 0 ? pl - 1 : 0
+          rightMargin = pr > 0 ? pr - 1 : cols - 1
+          if (leftMargin >= rightMargin) {
+            leftMargin = 0
+            rightMargin = cols - 1
+          }
+          if (leftMargin >= cols) leftMargin = 0
+          if (rightMargin >= cols) rightMargin = cols - 1
+          // Move cursor to home (top-left of margin area if origin mode, else absolute home)
+          curX = originMode ? leftMargin : 0
+          curY = originMode ? scrollTop : 0
+        } else {
+          savedCurX = curX
+          savedCurY = curY
+        }
         break
       case "u": // RCP - Restore Cursor Position
         curX = savedCurX
@@ -1032,6 +1104,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           case 2026:
             value = syncOutput ? 1 : 2
             break
+          case 69:
+            value = leftRightMarginMode ? 1 : 2
+            break
+          case 2031:
+            value = colorSchemeReporting ? 1 : 2
+            break
           case 5:
             value = reverseVideo ? 1 : 2
             break
@@ -1040,6 +1118,21 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             break
         }
         onResponse(`\x1b[?${mode};${value}$y`)
+      }
+      return
+    }
+
+    // Private DSR: CSI ? Ps n
+    if (finalByte === "n") {
+      if (onResponse) {
+        const ps = parts[0] ?? 0
+        if (ps === 6) {
+          // DECXCPR — Extended Cursor Position Report
+          onResponse(`\x1b[?${curY + 1};${curX + 1}n`)
+        } else if (ps === 997) {
+          // Color scheme report: 1 = dark, 2 = light
+          onResponse("\x1b[?997;1n")
+        }
       }
       return
     }
@@ -1142,11 +1235,22 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             clampCursor()
           }
           break
+        case 69: // DECLRMM - Left/Right Margin Mode
+          leftRightMarginMode = set
+          if (!set) {
+            // Reset margins when mode is disabled
+            leftMargin = 0
+            rightMargin = cols - 1
+          }
+          break
         case 2004: // Bracketed paste
           bracketedPaste = set
           break
         case 2026: // Synchronized output
           syncOutput = set
+          break
+        case 2031: // Color scheme reporting
+          colorSchemeReporting = set
           break
       }
     }
@@ -1181,15 +1285,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function handleEraseLine(mode: number): void {
+    const eraseRight = leftRightMarginMode ? rightMargin : cols - 1
+    const eraseLeft = leftRightMarginMode ? leftMargin : 0
     switch (mode) {
-      case 0: // Erase from cursor to end of line
-        eraseCells(curY, curX, curY, cols - 1)
+      case 0: // Erase from cursor to end of line (or right margin)
+        eraseCells(curY, curX, curY, eraseRight)
         break
-      case 1: // Erase from start to cursor
-        eraseCells(curY, 0, curY, curX)
+      case 1: // Erase from start (or left margin) to cursor
+        eraseCells(curY, eraseLeft, curY, curX)
         break
-      case 2: // Erase entire line
-        eraseCells(curY, 0, curY, cols - 1)
+      case 2: // Erase entire line (within margins if active)
+        eraseCells(curY, eraseLeft, curY, eraseRight)
         break
     }
   }
@@ -1224,10 +1330,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleDeleteChars(count: number): void {
     const row = grid[curY]
     if (!row) return
-    for (let i = 0; i < count; i++) {
-      if (curX < cols) {
-        row.splice(curX, 1)
-        row.push(emptyCell())
+    if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
+      // Delete within margin bounds: shift left, insert blanks at right margin
+      for (let i = 0; i < count; i++) {
+        if (curX <= rightMargin) {
+          row.splice(curX, 1)
+          row.splice(rightMargin, 0, emptyCell())
+        }
+      }
+    } else {
+      for (let i = 0; i < count; i++) {
+        if (curX < cols) {
+          row.splice(curX, 1)
+          row.push(emptyCell())
+        }
       }
     }
   }
@@ -1235,9 +1351,17 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   function handleInsertChars(count: number): void {
     const row = grid[curY]
     if (!row) return
-    for (let i = 0; i < count; i++) {
-      row.splice(curX, 0, emptyCell())
-      row.pop()
+    if (leftRightMarginMode && (leftMargin > 0 || rightMargin < cols - 1)) {
+      // Insert within margin bounds: shift right, drop chars at right margin
+      for (let i = 0; i < count; i++) {
+        row.splice(rightMargin, 1)
+        row.splice(curX, 0, emptyCell())
+      }
+    } else {
+      for (let i = 0; i < count; i++) {
+        row.splice(curX, 0, emptyCell())
+        row.pop()
+      }
     }
   }
 
@@ -1622,6 +1746,42 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
         break
       }
+      case 66: {
+        // OSC 66 — Text Sizing
+        if (value === "?" && onResponse) {
+          // Query: respond with current text scale
+          onResponse(`\x1b]66;s=${textScale}\x1b\\`)
+        } else {
+          // Parse key=value pairs (e.g., "s=2")
+          const kvPairs = value.split(";")
+          for (const pair of kvPairs) {
+            const [k, v] = pair.split("=")
+            if (k === "s" && v !== undefined) {
+              const n = parseInt(v, 10)
+              if (!isNaN(n) && n > 0) {
+                textScale = n
+              }
+            }
+          }
+        }
+        break
+      }
+      case 5522: {
+        // OSC 5522 — Advanced Clipboard (Kitty clipboard protocol)
+        if (value === "?" && onResponse) {
+          // Query: respond with stored clipboard data
+          const encoded = btoa(advancedClipboard)
+          onResponse(`\x1b]5522;${encoded}\x1b\\`)
+        } else {
+          // Store clipboard data (base64-encoded)
+          try {
+            advancedClipboard = atob(value)
+          } catch {
+            advancedClipboard = ""
+          }
+        }
+        break
+      }
       case 1337: {
         // iTerm2 proprietary sequences
         if (value === "ReportCellSize" && onResponse) {
@@ -1730,6 +1890,11 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     scrollTop = 0
     scrollBottom = rows - 1
 
+    // Reset left/right margins
+    leftRightMarginMode = false
+    leftMargin = 0
+    rightMargin = cols - 1
+
     // Reset attributes
     attrs = resetAttrs()
 
@@ -1778,6 +1943,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     sixelImages = []
     scrollTop = 0
     scrollBottom = rows - 1
+    leftRightMarginMode = false
+    leftMargin = 0
+    rightMargin = cols - 1
+    colorSchemeReporting = false
+    textScale = 1
+    advancedClipboard = ""
     viewportOffset = 0
     charsetG0 = false
     clipboard = ""
@@ -2209,6 +2380,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     rows = newRows
     scrollTop = 0
     scrollBottom = rows - 1
+    leftMargin = 0
+    rightMargin = cols - 1
     clampCursor()
   }
 
@@ -2306,7 +2479,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
       case "pixelMouse":
         return mouseTrackingMode === 1016
       case "leftRightMargin":
-        return false // Not implemented yet
+        return leftRightMarginMode
+      case "colorSchemeReporting":
+        return colorSchemeReporting
       case "kittyKeyboard":
         return kittyKeyboardFlags > 0
       case "kittyGraphics":
@@ -2319,7 +2494,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   // Suppress unused variable warnings
-  void [mouseTrackingMode]
+  void [mouseTrackingMode, textScale, advancedClipboard]
 
   return {
     get cols() {
