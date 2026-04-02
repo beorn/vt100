@@ -721,6 +721,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   }
 
   function writeCharCore(ch: string, wide: boolean): void {
+    // Guard: cannot write to a zero-dimension grid
+    if (cols <= 0 || rows <= 0) return
+
     const charWidth = wide ? 2 : 1
     const wrapBoundary = leftRightMarginMode ? rightMargin + 1 : cols
     const wrapReturn = leftRightMarginMode ? leftMargin : 0
