@@ -6,21 +6,25 @@ VT terminal emulator monorepo. Pure TypeScript, zero dependencies.
 
 | Package                     | npm                                                  | Description                                                                      |
 | --------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------- |
-| [vt100.js](packages/vt100/) | [`vt100.js`](https://www.npmjs.com/package/vt100.js) | VT220-era baseline — 8 colors, cursor, scroll regions, DA1/DSR                   |
+| [vt100.js](packages/vt100/) | [`vt100.js`](https://www.npmjs.com/package/vt100.js) | Strict VT100 — monochrome, cursor, scroll regions, DA1/DSR                       |
+| [vt220.js](packages/vt220/) | [`vt220.js`](https://www.npmjs.com/package/vt220.js) | VT220 — 8 colors, insert/delete, selective erase, soft reset                     |
 | [vterm.js](packages/vterm/) | [`vterm.js`](https://www.npmjs.com/package/vterm.js) | Modern terminal emulator — 100% of [terminfo.dev](https://terminfo.dev) features |
 
-## Why two packages?
+## Why three packages?
 
-**vt100.js** is small and focused — it implements what a VT100/VT220/xterm terminal does, which covers ~90% of real-world terminal usage. It's the default backend for [Termless](https://termless.dev) test suites.
+**vt100.js** is the strict baseline — a monochrome DEC VT100 (1978) emulator with bold, underline, blink, and inverse. No colors, no insert/delete operations. Fast and minimal.
+
+**vt220.js** adds what VT220 brought — 8 standard colors, insert/delete characters and lines, selective erase, hidden/conceal attribute, and soft reset. Covers ~90% of real-world terminal usage.
 
 **vterm.js** is comprehensive — it targets 100% coverage of the [terminfo.dev feature matrix](https://terminfo.dev): every SGR attribute, every cursor mode, every DEC private mode, every OSC/DCS sequence, device attribute responses, mouse tracking, synchronized output, text reflow, and Unicode rendering (emoji ZWJ, regional indicators, variation selectors).
 
-Use vt100.js when you want fast and simple. Use vterm.js when you need everything.
+Use vt100.js for strict VT100 conformance. Use vt220.js for most terminal testing. Use vterm.js when you need everything.
 
 ## Install
 
 ```bash
-npm install vt100.js    # VT100-era emulator
+npm install vt100.js    # Strict VT100 emulator (monochrome)
+npm install vt220.js    # VT220 emulator (8 colors, insert/delete)
 npm install vterm.js    # Modern full-featured emulator
 ```
 

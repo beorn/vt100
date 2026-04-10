@@ -6,15 +6,17 @@ Part of the [vterm](https://github.com/beorn/vterm) monorepo.
 
 ## Features
 
-- Full VT100/ANSI escape sequence parsing
-- SGR attributes (bold, italic, underline styles, colors, strikethrough, etc.)
-- 16-color, 256-color, and 24-bit truecolor support
-- Cursor movement, save/restore (DECSC/DECRC)
-- Screen modes (alternate screen, auto-wrap, origin mode, etc.)
+- Strict DEC VT100 (1978) emulation — monochrome display
+- SGR attributes: bold, underline (boolean), blink, inverse
+- Cursor movement (CUP, CUU, CUD, CUF, CUB, CHA, CNL, CPL, HVP, VPA)
+- Cursor save/restore (DECSC/DECRC)
+- Erase display/line (ED/EL)
 - Scroll regions (DECSTBM) with content preservation
+- Scroll up/down (SU/SD)
 - Scrollback buffer with configurable limit
-- Insert/delete characters and lines
-- Wide character support (CJK, emoji)
+- Screen modes (auto-wrap, origin mode, cursor visibility)
+- DEC special graphics charset
+- DA1/DSR/CPR device responses
 - Zero dependencies — works in Bun, Node.js, and browsers
 
 ## Install
@@ -70,16 +72,13 @@ console.log(screen.getCursorPosition()) // { x: 18, y: 0 }
 ```typescript
 interface ScreenCell {
   char: string
-  fg: CellColor | null // { r, g, b }
-  bg: CellColor | null
+  fg: CellColor | null // always null (VT100 is monochrome)
+  bg: CellColor | null // always null (VT100 is monochrome)
   bold: boolean
-  faint: boolean
-  italic: boolean
-  underline: "none" | "single" | "double" | "curly" | "dotted" | "dashed"
-  strikethrough: boolean
+  underline: boolean
+  blink: boolean
   inverse: boolean
   hidden: boolean
-  wide: boolean
 }
 ```
 

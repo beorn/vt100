@@ -154,24 +154,27 @@ interface ScreenCell {
 
 | Feature                                      | vt100.js | vterm.js |
 | -------------------------------------------- | -------- | -------- |
-| SGR basics (bold, italic, underline, colors) | Yes      | Yes      |
-| Underline styles (curly, dotted, dashed)     | Yes      | Yes      |
+| Bold, underline (boolean), blink, inverse    | Yes      | Yes      |
+| Colors (8/256/truecolor)                     | No       | Yes      |
+| Italic, faint, strikethrough, overline       | No       | Yes      |
+| Underline styles (curly, dotted, dashed)     | No       | Yes      |
 | Underline color                              | No       | Yes      |
-| Blink, overline                              | No       | Yes      |
+| Wide characters (CJK, emoji)                 | No       | Yes      |
 | Cursor shapes (DECSCUSR)                     | No       | Yes      |
+| Insert/delete characters and lines           | No       | Yes      |
 | OSC 8 hyperlinks                             | No       | Yes      |
-| DA1/DA2/DA3 responses                        | No       | Yes      |
+| DA1/DA2/DA3 responses                        | DA1 only | Yes      |
 | DSR/DECRPM responses                         | No       | Yes      |
 | Mouse tracking                               | No       | Yes      |
 | Focus tracking                               | No       | Yes      |
 | Synchronized output                          | No       | Yes      |
-| DEC Special Graphics                         | No       | Yes      |
+| DEC Special Graphics                         | Yes      | Yes      |
 | REP (repeat character)                       | No       | Yes      |
 | DECSTR (soft reset)                          | No       | Yes      |
 | DCS sequences                                | No       | Yes      |
 | Package size                                 | Smaller  | Larger   |
 
-**Use vt100.js** when you want fast and simple — it covers ~90% of real-world terminal usage.
+**Use vt100.js** for strict VT100 conformance — monochrome, no colors, no insert/delete. Fast and minimal.
 
 **Use vterm.js** when you need everything — 100% coverage of the [terminfo.dev](https://terminfo.dev) feature matrix.
 
