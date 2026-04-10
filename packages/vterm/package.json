@@ -17,7 +17,7 @@
   "homepage": "https://github.com/beorn/vterm/tree/main/packages/vterm",
   "bugs": "https://github.com/beorn/vterm/issues",
   "license": "MIT",
-  "author": "Beorn",
+  "author": "Bjørn Stabell",
   "repository": {
     "type": "git",
     "url": "https://github.com/beorn/vterm.git",

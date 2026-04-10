@@ -5,7 +5,7 @@
   "description": "VT terminal emulator monorepo — vt100.js (strict VT100) + vt220.js (VT220) + vterm.js (modern)",
   "homepage": "https://github.com/beorn/vterm",
   "license": "MIT",
-  "author": "Beorn",
+  "author": "Bjørn Stabell",
   "repository": "github:beorn/vterm",
   "workspaces": [
     "packages/*"
