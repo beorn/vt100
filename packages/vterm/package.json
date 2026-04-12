@@ -40,10 +40,10 @@
     }
   },
   "tsdown": {
-    "entry": "src/index.ts",
-    "format": "esm",
+    "clean": true,
     "dts": true,
-    "clean": true
+    "entry": "src/index.ts",
+    "format": "esm"
   },
   "engines": {
     "node": ">=23.6.0"
