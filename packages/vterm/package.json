@@ -24,14 +24,26 @@
     "directory": "packages/vterm"
   },
   "files": [
-    "src"
+    "dist"
   ],
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.mts",
+        "import": "./dist/index.mjs"
+      }
+    }
+  },
+  "tsdown": {
+    "entry": "src/index.ts",
+    "format": "esm",
+    "dts": true,
+    "clean": true
   },
   "engines": {
     "node": ">=23.6.0"
