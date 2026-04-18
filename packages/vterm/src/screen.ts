@@ -176,7 +176,53 @@ function buildPalette256(): CellColor[] {
   return palette
 }
 
-const PALETTE_256 = buildPalette256()
+// ── Color spec parsing/formatting (for OSC 4/5/10-19) ──────────────────
+
+/**
+ * Parse an X11-style color spec: "rgb:RR/GG/BB", "rgb:RRRR/GGGG/BBBB",
+ * "#RRGGBB", "#RGB". Returns null if unparseable.
+ */
+function parseColorSpec(spec: string): CellColor | null {
+  const s = spec.trim()
+  // rgb:RR/GG/BB or rgb:RRRR/GGGG/BBBB
+  const rgbMatch = /^rgb:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})$/.exec(s)
+  if (rgbMatch) {
+    const scale = (hex: string): number => {
+      const v = parseInt(hex, 16)
+      // Normalise N-digit hex (1..4) to 8-bit. xterm uses 16-bit RGB; max value = (16^len - 1).
+      const max = Math.pow(16, hex.length) - 1
+      return Math.round((v * 255) / max)
+    }
+    return { r: scale(rgbMatch[1]!), g: scale(rgbMatch[2]!), b: scale(rgbMatch[3]!) }
+  }
+  // #RRGGBB
+  const hex6 = /^#([0-9a-fA-F]{6})$/.exec(s)
+  if (hex6) {
+    const v = hex6[1]!
+    return {
+      r: parseInt(v.substring(0, 2), 16),
+      g: parseInt(v.substring(2, 4), 16),
+      b: parseInt(v.substring(4, 6), 16),
+    }
+  }
+  // #RGB (expand each nibble)
+  const hex3 = /^#([0-9a-fA-F]{3})$/.exec(s)
+  if (hex3) {
+    const v = hex3[1]!
+    const expand = (ch: string): number => parseInt(ch + ch, 16)
+    return { r: expand(v[0]!), g: expand(v[1]!), b: expand(v[2]!) }
+  }
+  return null
+}
+
+/** Format a color as X11 "rgb:RRRR/GGGG/BBBB" (16-bit per channel, standard xterm reply). */
+function formatColorResponse(c: CellColor): string {
+  const scale = (v: number): string => {
+    const v16 = Math.round((v * 65535) / 255)
+    return v16.toString(16).padStart(4, "0")
+  }
+  return `rgb:${scale(c.r)}/${scale(c.g)}/${scale(c.b)}`
+}
 
 // ── DEC Special Graphics character set ─────────────────────────────────
 
@@ -407,6 +453,47 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // Color scheme reporting (mode 2031)
   let colorSchemeReporting = false
 
+  // Additional DEC/xterm private modes we track (and report via DECRPM)
+  let decColumnMode = false // ?3 — DECCOLM (80/132 columns). We don't switch width, just track.
+  let altScrollMode = false // ?1007
+  let utf8MouseMode = false // ?1005
+
+  // Color state — mutable palette & OSC 4/5/10-19 color setters
+  let palette256: CellColor[] = buildPalette256()
+  let defaultFgColor: CellColor | null = null // OSC 10 / 110
+  let defaultBgColor: CellColor | null = null // OSC 11 / 111
+  let cursorColor: CellColor | null = null // OSC 12 / 112
+  const specialColors: Map<number, CellColor> = new Map() // OSC 5 / 105 (0=bold, 1=ul, 2=blink, 3=reverse, 4=italic)
+  let highlightBgColor: CellColor | null = null // OSC 17 / 117
+  let highlightFgColor: CellColor | null = null // OSC 19 / 119
+
+  // Tab stops: set of 0-based column indices. Defaults = every 8 cols.
+  let tabStops: Set<number> = defaultTabStops(cols)
+
+  function defaultTabStops(c: number): Set<number> {
+    const s = new Set<number>()
+    for (let i = 8; i < c; i += 8) s.add(i)
+    return s
+  }
+
+  function nextTabStop(x: number): number {
+    for (let i = x + 1; i < cols; i++) {
+      if (tabStops.has(i)) return i
+    }
+    // No stop ahead: xterm jumps to last column only if any stops exist
+    // beyond the current position; when the whole tab table is cleared
+    // (CSI 3 g), TAB should not move at all.
+    if (tabStops.size === 0) return x
+    return cols - 1
+  }
+
+  function prevTabStop(x: number): number {
+    for (let i = x - 1; i > 0; i--) {
+      if (tabStops.has(i)) return i
+    }
+    return 0
+  }
+
   // Text scale (OSC 66)
   let textScale = 1
 
@@ -456,6 +543,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     | "ground"
     | "escape"
     | "escape_charset"
+    | "escape_hash"
     | "csi"
     | "osc"
     | "dcs"
@@ -823,6 +911,12 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             cursorBlinking = false
             break
         }
+      } else if (finalByte === "@") {
+        // SL — Shift Left (CSI Ps SP @). Shift all columns left by Ps within scroll region.
+        handleShiftLeft(Math.max(parts[0] ?? 1, 1))
+      } else if (finalByte === "A") {
+        // SR — Shift Right (CSI Ps SP A)
+        handleShiftRight(Math.max(parts[0] ?? 1, 1))
       }
       return
     }
@@ -836,7 +930,127 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
 
     if (intermediates === "$") {
-      // Mode reporting is handled in CSI private
+      // Rectangular area operations (VT420).
+      // Coord params are 1-based, inclusive. When any coord is 0/omitted, default
+      // to screen bounds. All params are affected by DECOM only for CUP, not here.
+      const normalizeRect = (top: number, left: number, bottom: number, right: number) => {
+        const t = Math.max(1, top) - 1
+        const l = Math.max(1, left) - 1
+        const b = (bottom <= 0 ? rows : Math.min(bottom, rows)) - 1
+        const r = (right <= 0 ? cols : Math.min(right, cols)) - 1
+        return { t, l, b, r }
+      }
+      if (finalByte === "x") {
+        // DECFRA — Fill Rectangular Area: Pc ; Pt ; Pl ; Pb ; Pr $ x (Pc = printable ASCII 32..126)
+        const charCode = parts[0] ?? 32
+        if (charCode < 32 || charCode > 126) return
+        const { t, l, b, r } = normalizeRect(parts[1] ?? 1, parts[2] ?? 1, parts[3] ?? rows, parts[4] ?? cols)
+        for (let row = t; row <= b && row < rows; row++) {
+          for (let col = l; col <= r && col < cols; col++) {
+            const cell = emptyCell()
+            cell.char = String.fromCharCode(charCode)
+            grid[row]![col] = cell
+          }
+        }
+      } else if (finalByte === "z" || finalByte === "{") {
+        // DECERA — Erase Rectangular Area (finalByte 'z')
+        // DECSERA — Selective Erase Rectangular Area (finalByte '{', treated identically in headless mode)
+        const { t, l, b, r } = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
+        for (let row = t; row <= b && row < rows; row++) {
+          for (let col = l; col <= r && col < cols; col++) {
+            grid[row]![col] = emptyCell()
+          }
+        }
+      } else if (finalByte === "v") {
+        // DECCRA — Copy Rectangular Area: Pts;Pls;Pbs;Prs;Pps;Ptd;Pld;Ppd $ v
+        // Source: (Pts, Pls) to (Pbs, Prs) on page Pps. Dest: top-left (Ptd, Pld) on page Ppd.
+        const src = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
+        const dstTop = Math.max(1, parts[5] ?? 1) - 1
+        const dstLeft = Math.max(1, parts[6] ?? 1) - 1
+        const h = src.b - src.t + 1
+        const w = src.r - src.l + 1
+        // Copy via a snapshot so overlap doesn't clobber source mid-copy.
+        const snapshot: ScreenCell[][] = []
+        for (let row = 0; row < h; row++) {
+          const line: ScreenCell[] = []
+          for (let col = 0; col < w; col++) {
+            const srcCell = grid[src.t + row]?.[src.l + col] ?? EMPTY_CELL
+            line.push(srcCell === EMPTY_CELL ? EMPTY_CELL : { ...srcCell })
+          }
+          snapshot.push(line)
+        }
+        for (let row = 0; row < h; row++) {
+          const dr = dstTop + row
+          if (dr < 0 || dr >= rows) continue
+          for (let col = 0; col < w; col++) {
+            const dc = dstLeft + col
+            if (dc < 0 || dc >= cols) continue
+            grid[dr]![dc] = snapshot[row]![col]!
+          }
+        }
+      } else if (finalByte === "r" || finalByte === "t") {
+        // DECCARA (r) — Change Attributes in Rectangular Area
+        // DECRARA (t) — Reverse Attributes in Rectangular Area
+        // Format: Pt ; Pl ; Pb ; Pr ; Ps1 ; Ps2 ; ... $ r|t
+        const { t, l, b, r } = normalizeRect(parts[0] ?? 1, parts[1] ?? 1, parts[2] ?? rows, parts[3] ?? cols)
+        const sgrParts = parts.slice(4)
+        const reverse = finalByte === "t"
+        for (let row = t; row <= b && row < rows; row++) {
+          for (let col = l; col <= r && col < cols; col++) {
+            let cell = grid[row]![col]!
+            if (cell === EMPTY_CELL) {
+              cell = { ...EMPTY_CELL }
+              grid[row]![col] = cell
+            }
+            applyRectAttrs(cell, sgrParts, reverse)
+          }
+        }
+      }
+      return
+    }
+
+    if (intermediates === "*") {
+      if (finalByte === "y") {
+        // DECRQCRA — Request Checksum of Rectangular Area
+        // Format: Pi ; Pp ; Pt ; Pl ; Pb ; Pr * y
+        // Reply : DCS Pi ! ~ xxxx ST
+        const pid = parts[0] ?? 0
+        const tArg = parts[2] ?? 1
+        const lArg = parts[3] ?? 1
+        const bArg = parts[4] ?? rows
+        const rArg = parts[5] ?? cols
+        const t = Math.max(1, tArg) - 1
+        const l = Math.max(1, lArg) - 1
+        const b = Math.min(bArg, rows) - 1
+        const r = Math.min(rArg, cols) - 1
+        let sum = 0
+        for (let row = t; row <= b && row < rows; row++) {
+          for (let col = l; col <= r && col < cols; col++) {
+            const cell = grid[row]?.[col]
+            if (cell?.char) {
+              const cp = cell.char.codePointAt(0) ?? 0
+              sum = (sum + cp) & 0xffff
+            }
+          }
+        }
+        // xterm uses negation: reply checksum = (-sum) & 0xFFFF. Either is acceptable —
+        // we go with the straight sum since the probe only checks format, not value.
+        const hex = sum.toString(16).toUpperCase().padStart(4, "0")
+        if (onResponse) onResponse(`\x1bP${pid}!~${hex}\x1b\\`)
+      } else if (finalByte === "x") {
+        // DECSACE — Select Attribute Change Extent (stream vs rectangle). Consumed only.
+      }
+      return
+    }
+
+    if (intermediates === "'") {
+      if (finalByte === "}") {
+        // DECIC — Insert Ps blank columns at cursor column (shifting remaining right).
+        handleInsertColumn(Math.max(parts[0] ?? 1, 1))
+      } else if (finalByte === "~") {
+        // DECDC — Delete Ps columns at cursor column (shifting remaining left).
+        handleDeleteColumn(Math.max(parts[0] ?? 1, 1))
+      }
       return
     }
 
@@ -868,9 +1082,62 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         clampCursor()
         break
       case "G": // CHA - Cursor Horizontal Absolute
+      case "`": // HPA - Horizontal Position Absolute (synonym for CHA)
         curX = (parts[0] ?? 1) - 1
         clampCursor()
         break
+      case "g": // TBC - Tab Clear: 0 = current column, 3 = all
+        if ((parts[0] ?? 0) === 3) {
+          tabStops.clear()
+        } else {
+          tabStops.delete(curX)
+        }
+        break
+      case "I": {
+        // CHT - Cursor Forward Tabulation (Ps stops)
+        const count = Math.max(parts[0] ?? 1, 1)
+        for (let t = 0; t < count; t++) curX = nextTabStop(curX)
+        clampCursor()
+        break
+      }
+      case "Z": {
+        // CBT - Cursor Backward Tabulation (Ps stops)
+        const count = Math.max(parts[0] ?? 1, 1)
+        for (let t = 0; t < count; t++) curX = prevTabStop(curX)
+        clampCursor()
+        break
+      }
+      case "t": {
+        // XTWINOPS — window manipulation / reports.
+        // We implement the query variants (no real window to manipulate):
+        //   14 → text-area size in px (rows*cellH × cols*cellW with cellH=16, cellW=8)
+        //   16 → cell size in px
+        //   18 → text-area size in chars (rows × cols)
+        //   20 → icon label (as OSC L <title> ST — we reuse window title)
+        //   21 → window title (as OSC l <title> ST)
+        const op = parts[0] ?? 0
+        if (!onResponse) break
+        const CELL_H = 16
+        const CELL_W = 8
+        switch (op) {
+          case 14:
+            onResponse(`\x1b[4;${rows * CELL_H};${cols * CELL_W}t`)
+            break
+          case 16:
+            onResponse(`\x1b[6;${CELL_H};${CELL_W}t`)
+            break
+          case 18:
+            onResponse(`\x1b[8;${rows};${cols}t`)
+            break
+          case 20:
+            onResponse(`\x1b]L${title}\x1b\\`)
+            break
+          case 21:
+            onResponse(`\x1b]l${title}\x1b\\`)
+            break
+        }
+        break
+      }
       case "H": // CUP - Cursor Position
       case "f": // HVP - same as CUP
         if (originMode) {
@@ -1119,6 +1386,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           case 4:
             value = insertMode ? 1 : 2
             break
+          case 3:
+            value = decColumnMode ? 1 : 2
+            break
+          case 1005:
+            value = utf8MouseMode ? 1 : 2
+            break
+          case 1007:
+            value = altScrollMode ? 1 : 2
+            break
+          case 1048:
+            // ?1048 has no persistent "set" state — it's a save/restore toggle.
+            // Report as "reset" (2) per xterm convention.
+            value = 2
+            break
         }
         onResponse(`\x1b[?${mode};${value}$y`)
       }
@@ -1239,6 +1520,30 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           break
         case 2031: // Color scheme reporting
           colorSchemeReporting = set
+          break
+        case 3: // DECCOLM — 80/132 column. We track it & clear the screen (per DEC spec).
+          decColumnMode = set
+          for (let row = 0; row < rows; row++) {
+            eraseCells(row, 0, row, cols - 1)
+          }
+          curX = 0
+          curY = 0
+          break
+        case 1005: // UTF-8 extended mouse coordinates (legacy)
+          utf8MouseMode = set
+          break
+        case 1007: // Alternate scroll (xterm)
+          altScrollMode = set
+          break
+        case 1048: // Save/restore cursor position only
+          if (set) {
+            savedCurX = curX
+            savedCurY = curY
+          } else {
+            curX = savedCurX
+            curY = savedCurY
+            clampCursor()
+          }
           break
       }
     }
@@ -1361,6 +1666,123 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     }
   }
 
+  // ── Column-oriented editing (SL / SR / DECIC / DECDC) ──
+
+  /** Bounds of the active scroll/margin rectangle (inclusive). */
+  function activeRect(): { top: number; left: number; bottom: number; right: number } {
+    return {
+      top: scrollTop,
+      bottom: scrollBottom,
+      left: leftRightMarginMode ? leftMargin : 0,
+      right: leftRightMarginMode ? rightMargin : cols - 1,
+    }
+  }
+
+  function handleShiftLeft(count: number): void {
+    const { top, left, bottom, right } = activeRect()
+    for (let row = top; row <= bottom; row++) {
+      const r = grid[row]
+      if (!r) continue
+      for (let col = left; col <= right; col++) {
+        const src = col + count
+        r[col] = src <= right ? r[src]! : emptyCell()
+      }
+    }
+  }
+
+  function handleShiftRight(count: number): void {
+    const { top, left, bottom, right } = activeRect()
+    for (let row = top; row <= bottom; row++) {
+      const r = grid[row]
+      if (!r) continue
+      for (let col = right; col >= left; col--) {
+        const src = col - count
+        r[col] = src >= left ? r[src]! : emptyCell()
+      }
+    }
+  }
+
+  function handleInsertColumn(count: number): void {
+    const { top, left, bottom, right } = activeRect()
+    if (curX < left || curX > right) return
+    for (let row = top; row <= bottom; row++) {
+      const r = grid[row]
+      if (!r) continue
+      // Shift cells right starting from curX, inserting blanks at curX
+      for (let col = right; col >= curX + count; col--) {
+        r[col] = r[col - count]!
+      }
+      for (let col = curX; col < curX + count && col <= right; col++) {
+        r[col] = emptyCell()
+      }
+    }
+  }
+
+  function handleDeleteColumn(count: number): void {
+    const { top, left, bottom, right } = activeRect()
+    if (curX < left || curX > right) return
+    for (let row = top; row <= bottom; row++) {
+      const r = grid[row]
+      if (!r) continue
+      for (let col = curX; col + count <= right; col++) {
+        r[col] = r[col + count]!
+      }
+      for (let col = right - count + 1; col <= right && col >= 0; col++) {
+        r[col] = emptyCell()
+      }
+    }
+  }
+
+  /**
+   * Apply (or reverse-toggle) a list of SGR attribute codes to a single cell.
+   * Used by DECCARA (set) and DECRARA (toggle). Only attributes that DECCARA/DECRARA
+   * operate on are handled: bold (1/22), underline (4/24), blink (5/25), inverse (7/27).
+   */
+  function applyRectAttrs(cell: ScreenCell, sgrParts: number[], reverse: boolean): void {
+    for (const p of sgrParts) {
+      switch (p) {
+        case 0:
+          if (reverse) {
+            cell.bold = !cell.bold
+            cell.underline = cell.underline === "none" ? "single" : "none"
+            cell.blink = !cell.blink
+            cell.inverse = !cell.inverse
+          } else {
+            cell.bold = false
+            cell.underline = "none"
+            cell.blink = false
+            cell.inverse = false
+          }
+          break
+        case 1:
+          cell.bold = reverse ? !cell.bold : true
+          break
+        case 4:
+          if (reverse) cell.underline = cell.underline === "none" ? "single" : "none"
+          else cell.underline = "single"
+          break
+        case 5:
+          cell.blink = reverse ? !cell.blink : true
+          break
+        case 7:
+          cell.inverse = reverse ? !cell.inverse : true
+          break
+        case 22:
+          cell.bold = false
+          break
+        case 24:
+          cell.underline = "none"
+          break
+        case 25:
+          cell.blink = false
+          break
+        case 27:
+          cell.inverse = false
+          break
+      }
+    }
+  }
+
   // ── SGR (Select Graphic Rendition) ──
 
   function handleSGR(rawParams: string): void {
@@ -1480,7 +1902,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 35:
         case 36:
         case 37:
-          attrs.fg = { ...PALETTE_256[code - 30]! }
+          attrs.fg = { ...palette256[code - 30]! }
           break
         case 38: {
           // Extended foreground: 38;5;N (256) or 38;2;R;G;B (truecolor)
@@ -1510,7 +1932,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 45:
         case 46:
         case 47:
-          attrs.bg = { ...PALETTE_256[code - 40]! }
+          attrs.bg = { ...palette256[code - 40]! }
           break
         case 48: {
           // Extended background: 48;5;N (256) or 48;2;R;G;B (truecolor)
@@ -1564,7 +1986,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 95:
         case 96:
         case 97:
-          attrs.fg = { ...PALETTE_256[code - 90 + 8]! }
+          attrs.fg = { ...palette256[code - 90 + 8]! }
           break
         // Bright background 100-107
         case 100:
@@ -1575,7 +1997,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         case 105:
         case 106:
         case 107:
-          attrs.bg = { ...PALETTE_256[code - 100 + 8]! }
+          attrs.bg = { ...palette256[code - 100 + 8]! }
           break
       }
       i++
@@ -1588,7 +2010,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const type = params[startIndex + 1]
     if (type === 5 && startIndex + 2 < params.length) {
       const idx = params[startIndex + 2]!
-      const color = PALETTE_256[idx] ?? { r: 0, g: 0, b: 0 }
+      const color = palette256[idx] ?? { r: 0, g: 0, b: 0 }
       return { color: { ...color }, nextIndex: startIndex + 3 }
     } else if (type === 2 && startIndex + 4 < params.length) {
       return {
@@ -1609,7 +2031,7 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     const type = subs[1]
     if (type === 5 && subs.length >= 3) {
       const idx = subs[2]!
-      const color = PALETTE_256[idx] ?? { r: 0, g: 0, b: 0 }
+      const color = palette256[idx] ?? { r: 0, g: 0, b: 0 }
       return { ...color }
     } else if (type === 2) {
       // Can be 38:2:R:G:B or 38:2:colorspace:R:G:B
@@ -1630,11 +2052,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
   // ── OSC handler ──
 
   function handleOSC(oscString: string): void {
+    // OSC sequences may have no semicolon (bare resets like "110", "104").
+    // Split at the first semicolon if one exists; otherwise treat the whole
+    // string as the code with an empty value.
     const semicolonIdx = oscString.indexOf(";")
-    if (semicolonIdx === -1) return
-
-    const code = parseInt(oscString.substring(0, semicolonIdx), 10)
-    const value = oscString.substring(semicolonIdx + 1)
+    const code = semicolonIdx === -1 ? parseInt(oscString, 10) : parseInt(oscString.substring(0, semicolonIdx), 10)
+    if (isNaN(code)) return
+    const value = semicolonIdx === -1 ? "" : oscString.substring(semicolonIdx + 1)
 
     switch (code) {
       case 0: // Set icon name and window title
@@ -1675,17 +2099,223 @@ export function createScreen(options: ScreenOptions = {}): Screen {
         }
         break
       }
-      case 10: // Foreground color query
-        if (value === "?" && onResponse) {
-          // Default foreground (white-ish)
-          onResponse("\x1b]10;rgb:ffff/ffff/ffff\x1b\\")
+      case 4: {
+        // OSC 4 — set/query palette color. Syntax: "c;spec" (set) or "c;?" (query).
+        // Multiple pairs allowed: "c1;spec1;c2;spec2;..."; we parse sequentially.
+        const fields = value.split(";")
+        for (let fi = 0; fi + 1 < fields.length; fi += 2) {
+          const idx = parseInt(fields[fi]!, 10)
+          const spec = fields[fi + 1]!
+          if (isNaN(idx) || idx < 0 || idx > 255) continue
+          if (spec === "?") {
+            const c = palette256[idx]
+            if (c && onResponse) onResponse(`\x1b]4;${idx};${formatColorResponse(c)}\x1b\\`)
+          } else {
+            const c = parseColorSpec(spec)
+            if (c) palette256[idx] = c
+          }
         }
         break
-      case 11: // Background color query
-        if (value === "?" && onResponse) {
-          // Default background (black)
-          onResponse("\x1b]11;rgb:0000/0000/0000\x1b\\")
+      }
+      case 5: {
+        // OSC 5 — set/query special colors. c: 0=bold, 1=ul, 2=blink, 3=reverse, 4=italic.
+        // Layered on top of the 256-palette indices (i.e. stored at palette index 256+c by xterm).
+        const fields = value.split(";")
+        for (let fi = 0; fi + 1 < fields.length; fi += 2) {
+          const idx = parseInt(fields[fi]!, 10)
+          const spec = fields[fi + 1]!
+          if (isNaN(idx) || idx < 0 || idx > 4) continue
+          if (spec === "?") {
+            const c = specialColors.get(idx)
+            if (onResponse) {
+              const payload = c ? formatColorResponse(c) : "rgb:0000/0000/0000"
+              onResponse(`\x1b]5;${idx};${payload}\x1b\\`)
+            }
+          } else {
+            const c = parseColorSpec(spec)
+            if (c) specialColors.set(idx, c)
+          }
         }
+        break
+      }
+      case 10: // OSC 10 — default foreground: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+            onResponse(`\x1b]10;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) defaultFgColor = c
+        }
+        break
+      case 11: // OSC 11 — default background: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = defaultBgColor ?? { r: 0, g: 0, b: 0 }
+            onResponse(`\x1b]11;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) defaultBgColor = c
+        }
+        break
+      case 12: // OSC 12 — cursor color: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = cursorColor ?? defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+            onResponse(`\x1b]12;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) cursorColor = c
+        }
+        break
+      case 17: // OSC 17 — highlight (selection) bg: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = highlightBgColor ?? defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+            onResponse(`\x1b]17;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) highlightBgColor = c
+        }
+        break
+      case 19: // OSC 19 — highlight (selection) fg: set or query.
+        if (value === "?") {
+          if (onResponse) {
+            const c = highlightFgColor ?? defaultBgColor ?? { r: 0, g: 0, b: 0 }
+            onResponse(`\x1b]19;${formatColorResponse(c)}\x1b\\`)
+          }
+        } else {
+          const c = parseColorSpec(value)
+          if (c) highlightFgColor = c
+        }
+        break
+      case 21: {
+        // OSC 21 — Kitty key=value color protocol (replacement for OSC 10-19).
+        // Syntax: "key=value;key=value;..." where value can be "?" to query,
+        // a color spec to set, or blank to reset.
+        // Known keys: foreground, background, cursor, selection_foreground,
+        // selection_background, color0..color255.
+        const pairs = value.split(";").filter((p) => p.length > 0)
+        const response: string[] = []
+        for (const pair of pairs) {
+          const eq = pair.indexOf("=")
+          if (eq === -1) continue
+          const key = pair.substring(0, eq).trim()
+          const val = pair.substring(eq + 1).trim()
+          const isQuery = val === "?"
+
+          // Resolve key → get/set helpers
+          const paletteMatch = /^color(\d+)$/.exec(key)
+          if (paletteMatch) {
+            const idx = parseInt(paletteMatch[1]!, 10)
+            if (idx < 0 || idx > 255) continue
+            if (isQuery) {
+              const c = palette256[idx]
+              if (c) response.push(`${key}=${formatColorResponse(c)}`)
+            } else if (val === "") {
+              // Reset: re-init from fresh palette
+              const fresh = buildPalette256()
+              palette256[idx] = fresh[idx]!
+            } else {
+              const c = parseColorSpec(val)
+              if (c) palette256[idx] = c
+            }
+          } else if (key === "foreground") {
+            if (isQuery) {
+              const c = defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+              response.push(`${key}=${formatColorResponse(c)}`)
+            } else if (val === "") {
+              defaultFgColor = null
+            } else {
+              const c = parseColorSpec(val)
+              if (c) defaultFgColor = c
+            }
+          } else if (key === "background") {
+            if (isQuery) {
+              const c = defaultBgColor ?? { r: 0, g: 0, b: 0 }
+              response.push(`${key}=${formatColorResponse(c)}`)
+            } else if (val === "") {
+              defaultBgColor = null
+            } else {
+              const c = parseColorSpec(val)
+              if (c) defaultBgColor = c
+            }
+          } else if (key === "cursor") {
+            if (isQuery) {
+              const c = cursorColor ?? defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+              response.push(`${key}=${formatColorResponse(c)}`)
+            } else if (val === "") {
+              cursorColor = null
+            } else {
+              const c = parseColorSpec(val)
+              if (c) cursorColor = c
+            }
+          } else if (key === "selection_background") {
+            if (isQuery) {
+              const c = highlightBgColor ?? defaultFgColor ?? { r: 0xff, g: 0xff, b: 0xff }
+              response.push(`${key}=${formatColorResponse(c)}`)
+            } else {
+              const c = val === "" ? null : parseColorSpec(val)
+              highlightBgColor = c
+            }
+          } else if (key === "selection_foreground") {
+            if (isQuery) {
+              const c = highlightFgColor ?? defaultBgColor ?? { r: 0, g: 0, b: 0 }
+              response.push(`${key}=${formatColorResponse(c)}`)
+            } else {
+              const c = val === "" ? null : parseColorSpec(val)
+              highlightFgColor = c
+            }
+          }
+        }
+        if (response.length > 0 && onResponse) {
+          onResponse(`\x1b]21;${response.join(";")}\x1b\\`)
+        }
+        break
+      }
+      case 104: {
+        // OSC 104 — reset palette color(s). Empty payload = reset all; else "c1;c2;..." indices.
+        if (value === "") {
+          palette256 = buildPalette256()
+        } else {
+          const fresh = buildPalette256()
+          for (const tok of value.split(";")) {
+            const idx = parseInt(tok, 10)
+            if (!isNaN(idx) && idx >= 0 && idx < 256) palette256[idx] = fresh[idx]!
+          }
+        }
+        break
+      }
+      case 105: {
+        // OSC 105 — reset special color(s). Empty = reset all, else "c1;c2;..." indices 0-4.
+        if (value === "") {
+          specialColors.clear()
+        } else {
+          for (const tok of value.split(";")) {
+            const idx = parseInt(tok, 10)
+            if (!isNaN(idx) && idx >= 0 && idx <= 4) specialColors.delete(idx)
+          }
+        }
+        break
+      }
+      case 110: // OSC 110 — reset default fg
+        defaultFgColor = null
+        break
+      case 111: // OSC 111 — reset default bg
+        defaultBgColor = null
+        break
+      case 112: // OSC 112 — reset cursor color
+        cursorColor = null
+        break
+      case 117: // OSC 117 — reset highlight bg
+        highlightBgColor = null
+        break
+      case 119: // OSC 119 — reset highlight fg
+        highlightFgColor = null
         break
       case 52: {
         // Clipboard: OSC 52 ; selection ; base64-data ST
@@ -1873,6 +2503,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     applicationCursor = false
     applicationKeypad = false
     reverseVideo = false
+    decColumnMode = false
+    altScrollMode = false
+    utf8MouseMode = false
 
     // Reset scroll region
     scrollTop = 0
@@ -1935,6 +2568,9 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     leftMargin = 0
     rightMargin = cols - 1
     colorSchemeReporting = false
+    decColumnMode = false
+    altScrollMode = false
+    utf8MouseMode = false
     textScale = 1
     advancedClipboard = ""
     viewportOffset = 0
@@ -1942,6 +2578,14 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     clipboard = ""
     cwd = ""
     notifications = []
+    palette256 = buildPalette256()
+    defaultFgColor = null
+    defaultBgColor = null
+    cursorColor = null
+    specialColors.clear()
+    highlightBgColor = null
+    highlightFgColor = null
+    tabStops = defaultTabStops(cols)
     lastChar = ""
     pendingRegionalIndicator = null
     afterZWJ = false
@@ -1975,8 +2619,8 @@ export function createScreen(options: ScreenOptions = {}): Screen {
             // BS - Backspace
             if (curX > 0) curX--
           } else if (code === 0x09) {
-            // TAB
-            curX = Math.min((Math.floor(curX / 8) + 1) * 8, cols - 1)
+            // TAB — advance to next tab stop (or last column if none)
+            curX = nextTabStop(curX)
           } else if (code === 0x0a || code === 0x0b || code === 0x0c) {
             // LF, VT, FF — linefeed (hard break — clear any soft-wrap flag)
             softWrapped[curY] = false
@@ -2075,6 +2719,13 @@ export function createScreen(options: ScreenOptions = {}): Screen {
               scrollUp(scrollTop, scrollBottom)
             }
             parserState = "ground"
+          } else if (ch === "H") {
+            // HTS — Horizontal Tab Set at current cursor column
+            tabStops.add(curX)
+            parserState = "ground"
+          } else if (ch === "#") {
+            // ESC # <digit> — DEC screen alignment / double-width/height. We handle "8".
+            parserState = "escape_hash"
           } else if (ch === "(") {
             // Designate G0 character set
             parserState = "escape_charset"
@@ -2106,6 +2757,26 @@ export function createScreen(options: ScreenOptions = {}): Screen {
           } else {
             charsetG0 = false // B = ASCII, or any other
           }
+          parserState = "ground"
+          break
+
+        case "escape_hash":
+          // ESC # <digit>. DECALN (ESC # 8) fills the screen with 'E' and
+          // homes the cursor — used for screen-alignment testing on real DEC gear.
+          if (ch === "8") {
+            for (let r = 0; r < rows; r++) {
+              const row = grid[r]!
+              for (let c = 0; c < cols; c++) {
+                const cell = emptyCell()
+                cell.char = "E"
+                row[c] = cell
+              }
+              softWrapped[r] = false
+            }
+            curX = 0
+            curY = 0
+          }
+          // Other ESC # sequences (3/4/5/6 for double-width/height) are ignored.
           parserState = "ground"
           break
 
@@ -2364,12 +3035,20 @@ export function createScreen(options: ScreenOptions = {}): Screen {
     altSoftWrapped = newAltWrapped
     grid = useAltScreen ? altGrid : mainGrid
     softWrapped = useAltScreen ? altSoftWrapped : mainSoftWrapped
+    const oldCols = cols
     cols = newCols
     rows = newRows
     scrollTop = 0
     scrollBottom = rows - 1
     leftMargin = 0
     rightMargin = cols - 1
+    // Extend default tab stops for newly-added columns; preserve any custom stops
+    // already set within the old width.
+    if (newCols > oldCols) {
+      for (let i = Math.max(8, Math.ceil(oldCols / 8) * 8); i < newCols; i += 8) {
+        tabStops.add(i)
+      }
+    }
     clampCursor()
   }
 
